@@ -1,0 +1,2900 @@
+---
+title: "Shock sensor analysis"
+author: "Andraz Krasovec"
+date: "20.03.2017"
+output:
+  html_notebook: default
+---
+
+Set working directory and import libraries
+```{r, include=FALSE}
+setwd("D:/Sentinel/ai-research/shock_sensor_analysis/")
+
+library("ggmap")
+library("ggplot2")
+library("data.table")
+library("smooth")
+library("signal")
+library("stats")
+library("smoother")
+library("rpart")
+library("GGIR")
+library("randomForest")
+library("CORElearn")
+library("gapminder")
+library("gganimate")
+library("animation")
+library("ncdf4")
+library("ncdf4.helpers")
+library("doParallel")
+library("raster")
+library("plotly")
+library("captioner")
+
+# Remove all objects except functions
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+
+Import boat datasets
+```{r, include=FALSE}
+# Set the path and read the csv file
+path1 <- "aut_01.csv"
+path2 <- "aut_02.csv"
+path3 <- "aut_03.csv"
+path4 <- "aut_04.csv"
+path5 <- "aut_05.csv"
+path6 <- "aut_06.csv"
+path7 <- "aut_07.csv"
+path8 <- "aut_08.csv"
+# Read the csv file
+boat1 <- fread(path1)
+boat2 <- fread(path2)
+boat3 <- fread(path3)
+boat4 <- fread(path4)
+boat5 <- fread(path5)
+boat6 <- fread(path6)
+boat7 <- fread(path7)
+boat8 <- fread(path8)
+rm(path1, path2, path3, path4, path5, path6, path7, path8)
+```
+
+Classify types of movement
+```{r}
+# 3, 4, 6, 7
+# boat <- boat8
+# tmpb <- getmo(boat)
+# tmpb <- tmpb[tmpb$lon != 0 & tmpb$lat != 0, ]
+id <- 1
+
+tmpb <- fread(paste("merged/merged_firstclass_010.csv", sep = ""))
+tmpb$created <- as.POSIXct((tmpb$created))
+
+days <- unique(as.Date(tmpb$created, tz = "CET"))
+tmpb <- tmpb[as.Date(tmpb$created, tz = "CET") == days[1],]
+
+spt <- findRun(tmpb$speed)
+stat1 <- tmpb[1:spt[1],]
+run <- tmpb[(spt[1] + 1):spt[2],]
+stat2 <- tmpb[(spt[2] + 1):nrow(tmpb),]
+
+stat1 <- cut_time(stat1, min = 45, pos = "end")
+stat2 <- cut_time(stat2, min = 45, pos = "start")
+
+stat1$value <- stat1$shock
+run$value <- run$shock
+stat2$value <- stat2$shock
+
+nrow(stat1)
+nrow(stat2)
+
+tmp <- stat1
+
+tstat <- stats_comp[2,"sd"]
+trun <- stats_comp[1,"sd"]
+if(!is.null(nrow(stat1))) {
+  png(filename=paste("stat1_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+  tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), stat1 = tmp$value, wind_speed = tmp$wind_speed * 10)
+  plotdf <- melt(tmp, id = "time")
+  ggplot(data = plotdf,
+         aes(x = time, y = value, colour = variable)) +
+         geom_line() +
+         geom_hline(yintercept=tstat) +
+         geom_hline(yintercept=-tstat)
+  dev.off()
+}
+
+png(filename=paste("run_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+tmp <- run
+t <- sd(tmp$value)
+tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), run = tmp$value, wind_speed = tmp$wind_speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=trun) + geom_hline(yintercept=-trun) +
+       geom_hline(yintercept=trun * 2) + geom_hline(yintercept=trun * 3)
+dev.off()
+
+if(!is.null(nrow(stat2))) {
+  png(filename=paste("stat2_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+  tmp <- stat2
+  t <- sd(tmp$value)
+  tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), stat2 = tmp$value, wind_speed = tmp$wind_speed * 10)
+  plotdf <- melt(tmp, id = "time")
+  ggplot(data = plotdf,
+         aes(x = time, y = value, colour = variable)) +
+         geom_line() +
+         geom_hline(yintercept=tstat) +
+         geom_hline(yintercept=-tstat)
+  dev.off()  
+}
+
+# rm(run, stat1, stat2, tmpb, spt, t, trun, tstat, id, tmp, plotdf)
+```
+
+Analysis of joint data
+```{r}
+get_mov <- function(boat) {
+  tmpb <- getmo(boat)
+  spt <- findRun(tmpb$speed)
+  stat1 <- tmpb[1:spt[1],]
+  run <- tmpb[(spt[1] + 1):spt[2],]
+  stat2 <- tmpb[(spt[2] + 1):nrow(tmpb),]
+  stat1 <- cut_time(stat1, 45, "end")
+  stat2 <- cut_time(stat2, 45, "start")
+  return(c(stat1, run, stat2))
+}
+
+run_comp <- NULL
+stat_comp <- NULL
+
+for(i in 1:7) {
+  fname <- paste("aut_0",i,".csv",sep="")
+  # print(fname)
+  boat <- fread(fname)
+  a <- get_mov(boat)
+  stat_comp <- rbind(stat_comp, data.frame(time = a[[1]], x = a[[2]], y = a[[3]], z = a[[4]], value = a[[5]], speed = a[[8]]))
+  run_comp <- rbind(run_comp, data.frame(time = a[[10]], x = a[[11]], y = a[[12]], z = a[[13]], value = a[[14]], speed = a[[17]]))
+  stat_comp <- rbind(stat_comp, data.frame(time = a[[19]], x = a[[20]], y = a[[21]], z = a[[22]], value = a[[23]], speed = a[[26]]))
+}
+
+stats_comp <- data.frame(
+  state = c("Run","Stat"), 
+  maxval = c(max(run_comp$value), max(stat_comp$value)), 
+  minval = c(min(run_comp$value), min(stat_comp$value)), 
+  sd = c(sd(run_comp$value), sd(stat_comp$value)), 
+  median = c(median(run_comp$value),median(stat_comp$value)), 
+  mean = c(mean(run_comp$value),mean(stat_comp$value))
+  )
+
+stat_comp$value <- stat_comp$value - stats_comp[2,"median"]
+run_comp$value <- run_comp$value - stats_comp[1,"median"]
+
+tstat <- stats_comp[2,"sd"]
+trun <- stats_comp[1,"sd"]
+
+# png(filename='stat.png', width=4096,height=4096,units="px",res=100)
+stat_comp$index <- seq(1,nrow(stat_comp),1)
+plotdf <- melt(data.frame(time = stat_comp$index, value = stat_comp$value), id = "time")
+ggplot(data = plotdf, aes(x = time, y = value, colour = variable)) + geom_line() + 
+  geom_hline(yintercept = tstat) + geom_hline(yintercept = - tstat) +
+  geom_hline(yintercept = tstat * 2) + geom_hline(yintercept = tstat * 3)
+# dev.off()
+
+# png(filename='run.png', width=4096,height=4096,units="px",res=100)
+run_comp$index <- seq(1,nrow(run_comp),1)
+plotdf <- melt(data.frame(time = run_comp$index, value = run_comp$value), id = "time")
+ggplot(data = plotdf, aes(x = time, y = value, colour = variable)) + geom_line() + 
+  geom_hline(yintercept = trun) + geom_hline(yintercept = - trun) + 
+  geom_hline(yintercept = trun * 2) + geom_hline(yintercept = - trun * 2) +
+  geom_hline(yintercept = trun * 3) + geom_hline(yintercept = - trun * 3)
+# dev.off()
+
+sd1 <- 0
+sd2 <- 0
+sd3 <- 0
+for(i in 1:nrow(run_comp)) {
+  if(abs(run_comp[i,"value"]) > trun) {
+    sd1 <- sd1 + 1
+    if(abs(run_comp[i,"value"]) > trun * 2) {
+      sd2 <- sd2 + 1
+      if(abs(run_comp[i,"value"]) > trun * 3) {
+        sd3 <- sd3 + 1
+      }
+    }  
+  }
+}
+
+sd1 <- sd1 / nrow(run_comp) * 100
+sd2 <- sd2 / nrow(run_comp) * 100
+sd3 <- sd3 / nrow(run_comp) * 100
+rm(sd1,sd2,sd3)
+
+# stat_comp_nocut$value <- ifelse(stat_comp_nocut$value > tstat_nocut, 0, stat_comp_nocut$value)
+# stat_comp_nocut$value <- ifelse(stat_comp_nocut$value < -tstat_nocut, 0, stat_comp_nocut$value)
+# plotdf <- melt(data.frame(time = stat_comp_nocut$index, value = stat_comp_nocut$value), id = "time")
+# ggplot(data = plotdf, aes(x = time, y = value, colour = variable)) + geom_line() + 
+#   geom_hline(yintercept = tstat_nocut) + geom_hline(yintercept = - tstat_nocut)
+
+rm(run_comp, stat_comp, plotdf, a, fname, i, trun, tstat, boat)
+```
+
+Data prep
+```{r}
+files <- dir("merged")
+
+res <- NULL
+
+# Merge all files into one dataframe
+for(i in 1:length(files)) {
+  boat <- fread(paste("merged/",files[i], sep = ""))
+  boat$idx <- as.character(i)
+  res <- rbind(res, boat)    
+}
+
+names(res)[names(res) == "value"] <- "shock"
+# Omit lines with invalid values
+res <- clean_data(res)
+norm_shock <- res$shock - mean(res$shock)
+
+# Calculate stats for every boat
+stats <- data.frame(
+  id = 0,
+  sd = sd(res$shock),
+  mean = mean(res$shock),
+  median = median(res$shock),
+  max = max(res$shock),
+  min = min(res$shock),
+  max_norm = max(norm_shock),
+  min_norm = min(norm_shock)
+)
+
+for(i in 1:length(files)) {
+  tmpb <- res[res$idx == i,]
+  norm_shock <- tmpb$shock - mean(tmpb$shock)
+  stats <- rbind(stats, data.frame(
+    id = i,
+    sd = sd(tmpb$shock),
+    mean = mean(tmpb$shock),
+    median = median(tmpb$shock),
+    max = max(tmpb$shock),
+    min = min(tmpb$shock),
+    max_norm = max(norm_shock),
+    min_norm = min(norm_shock)
+  ))
+}
+
+rm(boat, tmpb, files, i, norm_shock)
+```
+
+Analysis
+```{r}
+restmp <- res
+int_id <- 8
+files <- dir("merged")
+
+# Select one boat
+resid <- restmp[restmp$idx == 1, ]
+
+# Standard deviation and median for current boat
+med <- median(resid$shock)
+sd <- sd(resid$shock)
+# Standard deviation and median for all boats combined
+medall <- median(restmp$shock)
+sdall <- sd(restmp$shock)
+
+# Normalize shock data for the current boat
+resid$shock <- resid$shock - med
+# Normalize shock data for all boats combined
+restmp$shock <- restmp$shock - medall
+
+# Extract moving and stationary parts from the current boat data
+run <- get_run(resid)
+stat <- get_stat(resid)
+
+# Set an integer time variable for a nicer plot
+for(i in 1:nrow(run)) {
+  run[i,"int_time"] <- i
+}
+
+# Set an integer time variable for a nicer plot
+for(i in 1:nrow(stat)) {
+  stat[i,"int_time"] <- i
+}
+stat <- stat[stat$speed <= 0, ]
+
+# png(filename = "graph_01.png", height = 2048, width = 2048, units = "px")
+tmp <- data.frame(time = as.POSIXct(resid$created), wind_speed = resid$wind_speed * 100, boat_speed = resid$speed * 100, shock = resid$shock)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept = 3 * sd) +
+       geom_hline(yintercept = - 3 * sd) +
+       geom_hline(yintercept = 3 * sdall, color = "orange") +
+       geom_hline(yintercept = - 3 * sdall, color = "orange")
+# dev.off()
+
+# png(filename = "graph_02.png", height = 2048, width = 2048, units = "px")
+tmp <- data.frame(time = run$int_time, wind_speed = run$wind_speed * 100, boat_speed = run$speed * 100, shock = run$shock)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept = 3 * sd) +
+       geom_hline(yintercept = - 3 * sd) +
+       geom_hline(yintercept = 3 * sdall, color = "orange") +
+       geom_hline(yintercept = - 3 * sdall, color = "orange")
+# dev.off()
+
+# png(filename = "graph_03.png", height = 2048, width = 2048, units = "px")
+tmp <- data.frame(time = stat$int_time, wind_speed = stat$wind_speed * 100, boat_speed = stat$speed * 100, shock = stat$shock)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept = 3 * sd) +
+       geom_hline(yintercept = - 3 * sd) +
+       geom_hline(yintercept = 3 * sdall, color = "orange") +
+       geom_hline(yintercept = - 3 * sdall, color = "orange")
+# dev.off()
+
+# Plot histograms for all boats (shock)
+# restmp <- restmp[abs(restmp$shock) < 1000,]
+
+len <- NULL
+for(i in 1:length(files)) {
+  tmpb <- restmp[restmp$idx == i, ]
+  # tmpb <- tmpb[tmpb$shock < 2000, ]
+  # tmpb <- get_run(tmpb)
+  # tmpb <- get_stat(tmpb)
+  
+  print(ggplot(tmpb, aes(tmpb$shock)) + geom_histogram(bins = 22) + ggtitle(paste("Index:",i)))
+}
+rm(plotdf, tmp, tmpb, files, i, restmp, int_id, len, med, medall, sd, sdall)
+# rm(res, resid)
+
+```
+
+Outliers analysis
+```{r}
+tmp <- res
+# tmp <- tmp[tmp$idx == 9,]
+
+t <- 1000
+# t <- 3 * sd(tmp$shock)
+
+tmp$shock <- tmp$shock - mean(tmp$shock)
+
+outliers <- tmp[abs(tmp$shock) > t, ]
+
+oneDevice <- outliers
+# oneDevice <- tmp
+
+# Get a bounding box
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 7, scale = 1, center)
+
+png(filename='shock_test.png', width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = sailpoint, size = shock)) 
+  # scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "blue")
+dev.off()
+
+rm(tmp, sbbox, map, t)
+```
+
+Class analysis
+```{r}
+files <- dir("merged")
+
+runs <- NULL
+stats <- NULL
+stats_class <- NULL
+
+for(i in 1:length(files)) {
+  tmpb <- fread(paste("merged/", files[i], sep = ""))
+  colnames(tmpb)[colnames(tmpb) == "Shock amplitude"] <- "shock"
+  tmpb <- clean_data(tmpb)
+  
+  tmpb$shock <- tmpb$shock - mean(tmpb$shock)
+  run <- get_run(tmpb)
+  stat <- get_stat(tmpb)
+
+  norm_run_shock <- run$shock - mean(run$shock)
+  norm_stat_shock <- stat$shock - mean(stat$shock)
+
+  stats_class <- rbind(stats_class, data.frame(
+    class = c(paste("Run",i), paste("Stat",i)),
+    sd = c(sd(run$shock), sd(stat$shock)),
+    median = c(median(run$shock), median(stat$shock)),
+    mean = c(mean(run$shock), mean(stat$shock)),
+    max = c(max(run$shock), max(stat$shock)),
+    min = c(min(run$shock), min(stat$shock)),
+    boat_id = c(as.numeric(run[1,"boat_id"]), as.numeric(stat[1, "boat_id"]))
+  ))
+  
+  runs <- rbind(runs, run)
+  stats <- rbind(stats, stat)
+  
+}
+
+stats_class <- rbind(stats_class, data.frame(
+  class = c("Run complete", "Stat complete"),
+  sd = c(sd(runs$shock), sd(stats$shock)),
+  median = c(median(runs$shock), median(stats$shock)),
+  mean = c(mean(runs$shock), mean(stats$shock)),
+  max = c(max(runs$shock), max(stats$shock)),
+  min = c(min(runs$shock), min(stats$shock)),
+  boat_id = c(-1,-1)
+  
+))
+
+stats_class <- stats_class[stats_class$sd != 0 | stats_class$median != 0 | stats_class$mean != 0 | stats_class$max != 0 | stats_class$min != 0, ]
+```
+
+Shock count analysis
+```{r}
+data <- fread("firstclass_may.csv")
+ids <- unique(data$boat_id)
+
+data_sc <- data[data$name == "Shock Count", c("boat_id","speed","bearing","created","value","st_x","st_y")]
+for(i in 1:length(ids)) {
+  tmp <- data_sc[data_sc$boat_id == ids[i], ]
+
+  tmp <- data.frame(time = as.POSIXct(tmp$created), speed = tmp$speed * 1000, shock_count = tmp$value, wind_speed = tmp$wind_speed)
+  plotdf <- melt(tmp, id = "time")
+  print(ggplot(data = plotdf,
+         aes(x = time, y = value, colour = variable)) +
+        geom_line() +
+    ggtitle(paste("Boat_id:",ids[i])))
+}
+
+as.POSIXct(as.character(data[1,"created"]), tz = "UTC")
+
+# tmpb <- data[data$boat_id == 1877, ]
+# 
+# png(filename = "graph_01.png", height = 2048, width = 2048, units = "px")
+# 
+# tmp <- data.frame(time = as.POSIXct(tmpb$created), speed = tmpb$speed * 1000, shock_count = tmpb$value)
+#   plotdf <- melt(tmp, id = "time")
+#   print(ggplot(data = plotdf,
+#          aes(x = time, y = value, colour = variable)) +
+#         geom_line() +
+#     ggtitle(paste("Boat_id:",1877)))
+# 
+# dev.off()
+# tmpb <- data[data$boat_id == 1882, ]
+# 
+# png(filename = "graph_02.png", height = 2048, width = 2048, units = "px")
+# 
+# tmp <- data.frame(time = as.POSIXct(tmpb$created), speed = tmpb$speed * 1000, shock_count = tmpb$value)
+#   plotdf <- melt(tmp, id = "time")
+#   print(ggplot(data = plotdf,
+#          aes(x = time, y = value, colour = variable)) +
+#         geom_line() +
+#     ggtitle(paste("Boat_id:",1878)))
+# 
+# dev.off()
+
+data_sa <- data[data$name == "Shock amplitude", c("boat_id","speed","bearing","created","value","st_x","st_y")]
+
+data_x <- data[data$name == "Acceleration", c("boat_id","speed","bearing","created","value","st_x","st_y")]
+
+# for(i in 1:length(ids)) {
+#   xsa <- data_sa[data_sa$boat_id == ids[i], ]
+#   x <- data_x[data_x$boat_id == ids[i], ]
+#   if(nrow(xsa) != nrow(x)) {
+#     print(i)
+#   }
+# }
+
+sa <- data_sa[data_sa$boat_id == ids[1], ]
+
+
+
+```
+
+Shock count and weather correlation
+```{r}
+data_sc <- merge_wb("firstclass_may.csv", sensor_name = "Shock Count")
+data_x <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration")
+data_y <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 1")
+data_z <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 2")
+data_sc$shock <- sqrt(data_x$value^2 + data_y$value^2 + data_z$value^2)
+data_sc <- clean_data(data_sc)
+rm(data_x, data_y, data_z)
+```
+
+```{r}
+sc <- data_sc
+
+ids <- unique(sc$boat_id)
+ids <- ids[order(ids)]
+
+for(i in 1:length(ids)) {
+  tmp <- sc[sc$boat_id == ids[i],]
+  border <- find_runs(tmp$speed)
+  for(j in 1:length(border)) {
+    border[j] <- as.POSIXct(as.character(tmp[border[j],"created"]))
+  }
+
+  tmp <- data.frame(created = as.POSIXct(tmp$created), count = tmp$value, wind_speed = tmp$wind_speed * 1000)
+  
+  plotdf <- melt(tmp, id = "created")
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() +
+        ggtitle(paste("Boat_id:",ids[i])))
+        
+}
+
+for(i in 1:length(ids)) {
+  tmp <- sc[sc$boat_id == ids[i], ]
+  border <- find_runs(tmp$speed)
+  for(j in 1:length(border)) {
+    border[j] <- as.POSIXct(as.character(tmp[border[j],"created"]))
+  }
+  
+  tmp <- data.frame(created = as.POSIXct(tmp$created), count = tmp$value, shock = tmp$shock, wind_speed = tmp$wind_speed * 1000)
+  plotdf <- melt(tmp, id = "created")
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+          geom_line() +
+          ggtitle(paste("Boat_id:",ids[i])) + 
+          geom_vline(xintercept = border)
+        )
+}
+
+tmp <- sc[sc$boat_id == 1882, ]
+border <- find_runs(tmp$speed)
+for(j in 1:length(border)) {
+  border[j] <- as.POSIXct(as.character(tmp[border[j],"created"]))
+}
+
+tmp <- data.frame(created = as.POSIXct(tmp$created), count = tmp$value, shock = tmp$shock)
+plotdf <- melt(tmp, id = "created")
+  
+png(filename = "graph_01.png", height = 2048, width = 2048, units = "px")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+      geom_line() +
+      ggtitle(paste("Boat_id:",ids[i])) + 
+      geom_hline(yintercept = mean(tmp$count), color = "orange") +
+      geom_hline(yintercept = median(tmp$count), color = "blue")
+dev.off()
+
+# rm(plotdf, tmp, sc, border, i, ids, j)
+```
+
+With weather data
+```{r}
+get_mov_weather <- function(boat) {
+  spt <- findRun(boat$speed)
+  stat1 <- boat[1:spt[1],]
+  run <- boat[(spt[1] + 1):spt[2],]
+  stat2 <- boat[(spt[2] + 1):nrow(boat),]
+  stat1 <- cut_time(stat1, 45, "end")
+  stat2 <- cut_time(stat2, 45, "start")
+  return(c(stat1, run, stat2))
+}
+
+path <- "merged_0"
+
+stat_comp <- NULL
+run_comp <- NULL
+
+for(i in 2:7) {
+  boat <- fread(paste(path, i, ".csv", sep = ""))
+  parts <- get_mov_weather(boat)
+  stat_comp <- rbind(stat_comp, data.frame(parts[1:16]))
+  run_comp <- rbind(run_comp, data.frame(parts[17:32]))
+  stat_comp <- rbind(stat_comp, data.frame(parts[33:48]))
+}
+
+tstat <- stats_comp[2,"sd"]
+stat_comp$shock <- stat_comp$shock - stats_comp[2,"median"]
+
+stat_comp$index <- seq(1,nrow(stat_comp),1)
+plotdf <- melt(data.frame(time = stat_comp$index, shock = stat_comp$shock, wind_speed = stat_comp$wind_speed * 10), id = "time")
+ggplot(data = plotdf, aes(x = time, y = value, colour = variable)) + geom_line() + 
+  geom_hline(yintercept = tstat) + geom_hline(yintercept = - tstat) +
+  geom_hline(yintercept = tstat * 2) + geom_hline(yintercept = tstat * 3)
+
+tstat <- stats_comp[1,"sd"]
+run_comp$shock <- run_comp$shock - stats_comp[1,"median"]
+
+run_comp$index <- seq(1,nrow(run_comp),1)
+plotdf <- melt(data.frame(time = run_comp$index, shock = run_comp$shock, wind_speed = run_comp$wind_speed * 100), id = "time")
+ggplot(data = plotdf, aes(x = time, y = value, colour = variable)) + geom_line() + 
+  geom_hline(yintercept = tstat) + geom_hline(yintercept = - tstat) +
+  geom_hline(yintercept = tstat * 2) + geom_hline(yintercept = tstat * 3)
+
+
+rm(boat, plotdf, run_comp, stat_comp, i, parts, path, tstat)
+```
+
+Execution
+```{r}
+# boat_path <- "aut_08.csv"
+# device_id <- 764
+
+boat_path <- "firstclass_may.csv"
+
+merged.data <- merge_wb(
+  boat_path = boat_path,
+  directory = "GRIB/",
+  sensor_name = "Shock Count",
+  boat_id = 1881
+  )
+```
+
+Write merged data to CSV files (Shock amplitude)
+```{r}
+boat_paths <- c("aut_02.csv", "aut_03.csv", "aut_04.csv", "aut_05.csv", "aut_06.csv", "aut_07.csv", "aut_08.csv")
+
+for(i in 1:length(boat_paths)) {
+  tmp.merged <- merge_wb(
+    boat_path = paste("aut_0",i+1,".csv", sep = ""),
+    directory = "GRIB/",
+    sensor_name = "Shock amplitude"
+  )
+  fwrite(tmp.merged, paste("merged/merged_0",(i+1),".csv", sep = ""))
+}
+
+rm(i, boat_paths, tmp.merged)
+```
+
+```{r}
+ids <- unique(fread("firstclass_may.csv")$boat_id)
+
+for(i in 1:length(ids)) {
+  tryCatch({
+    tmp.merged <- merge_wb(
+      boat_path = "firstclass_may.csv",
+      directory = "GRIB/",
+      sensor_name = "Shock amplitude",
+      boat_idx = ids[i]
+    )
+    fwrite(tmp.merged, paste("merged/merged_firstclass_0",(i+9),".csv", sep = ""))  
+  }, error = function(e) {
+    print("No boat data, moving to the next one...")
+    file.remove(paste("merged/merged_firstclass_0",(i+9),".csv", sep = ""))
+  })
+}
+
+rm(i, tmp.merged, ids)
+```
+
+Visualization
+```{r}
+get_hour_int <- function(x) {
+  res <- x[1,]
+  tim <- substr(as.character(x[1,"created"]),12,13)
+  for(i in 2:nrow(x)) {
+    if(tim != substr(as.character(x[i,"created"]),12,13)) {
+      res <- rbind(res, x[i,])
+      tim <- substr(as.character(x[i,"created"]),12,13)
+    }
+  }
+  return(res)
+}
+identifier <- "_fc_01"
+
+oneDevice <- merged.data[merged.data$st_x != 0 & merged.data$st_y != 0, ]
+# oneDevice <- stat
+# oneDevice <- oneDevice[oneDevice$created < as.POSIXct("2017-05-14 13:00:00") & oneDevice$created > as.POSIXct("2017-05-14 12:00:00"),]
+# oneDevice$shock <- oneDevice$shock - median(oneDevice$shock)
+oneDevice <- oneDevice[oneDevice$shock > 2000, ]
+hourly <- get_hour_int(oneDevice)
+
+# Get a bounding box
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 10, scale = 1, center)
+
+# # Write to a file
+png(filename=paste('wind_direction', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = wind_direction), size = 5, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow", midpoint = 180) +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "green", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename=paste('sailpoint', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = sailpoint), size = 5, alpha = 1) +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "blue", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename=paste('boat_speed', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = speed), size = 5, alpha = 1) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow", midpoint = median(oneDevice$speed)) +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "blue", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename=paste('boat_shock', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 5, alpha = 0.5) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow", midpoint = median(oneDevice$shock)) +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "blue", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename=paste('wind_speed', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = wind_speed), size = 5, alpha = 1) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow", midpoint = median(oneDevice$wind_speed)) +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "blue", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename=paste('combined', identifier, '.png', sep = ""), width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = wind_speed, size = shock), alpha = 1) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow") +
+  geom_point(data = hourly, aes(x = st_x, y = st_y), color = "blue", size = 3, alpha = 1)
+
+# Close file
+dev.off()
+
+# rm(map, sbbox, hourly, oneDevice)
+```
+
+Component analysis
+```{r}
+data_xyz <- fread("firstclass_may.csv")
+
+data_x <- data_xyz[data_xyz$name == "Acceleration",  c("boat_id","created","speed","bearing","st_x","st_y","name","value")]
+
+data_y <- data_xyz[data_xyz$name == "Acceleration 1",c("boat_id","created","speed","bearing","st_x","st_y","name","value")]
+
+data_z <- data_xyz[data_xyz$name == "Acceleration 2",c("boat_id","created","speed","bearing","st_x","st_y","name","value")]
+
+data_count <- data_xyz[data_xyz$name == "Shock Count", ]
+
+data_xyz <- data.frame(
+  boat_id = data_x$boat_id,
+  created = data_x$created,
+  speed = data_x$speed,
+  bearing = data_x$bearing,
+  st_x = data_x$st_x,
+  st_y = data_x$st_y,
+  x_value = data_x$value,
+  y_value = data_y$value,
+  z_value = data_z$value,
+  shock = sqrt(data_x$value^2 + data_y$value^2 + data_z$value^2),
+  count = data_count$value
+)
+data_xyz <- clean_data(data_xyz)
+
+ids <- unique(data_xyz$boat_id)
+ids <- ids[order(ids)]
+
+stat <- NULL
+run <- NULL
+
+for(i in 1:length(ids)) {
+  tmp <- data_xyz[data_xyz$boat_id == ids[i],]
+  tmp <- tmp[with(tmp, order(created, decreasing = FALSE)), ]
+  
+  stat <- rbind(stat, get_stat(tmp))  
+  run <- rbind(run, get_run(tmp))  
+}
+
+stat <- stat[with(stat, order(created, decreasing = FALSE)), ]
+run <- run[with(run, order(created, decreasing = FALSE)), ]
+
+stat$time <- seq(1,nrow(stat),1)
+run$time <- seq(1,nrow(run),1)
+
+outliers <- NULL
+
+for(i in 1:length(ids)) {
+  # tmp <- stat[stat$boat_id == ids[i],]
+  # 
+  # x <- tmp$x_value - mean(tmp$x_value)
+  # y <- tmp$y_value - mean(tmp$y_value)
+  # z <- tmp$z_value - mean(tmp$z_value)
+  # 
+  # del <- NULL
+  # for(j in 1:length(x)) {
+  #   if(abs(x[j]) > 1000 | abs(y[j]) > 1000 | abs(z[j]) > 1000) {
+  #     del <- c(del, j)
+  #   }
+  # }
+  # 
+  # if(!is.null(del))
+  #   tmp <- tmp[setdiff(1:nrow(tmp),c(del)),]
+  # 
+  # tmp <- data.frame(created = as.POSIXct(tmp$created), x = tmp$x_value, y = tmp$y_value, z = tmp$z_value)
+  # plotdf <- melt(tmp, id = "created")
+  # print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+  #         geom_line() +
+  #         ggtitle(paste("Boat_id:",ids[i])))
+  # 
+  # tmp <- run[run$boat_id == ids[i],]
+  # 
+  # x <- tmp$x_value - mean(tmp$x_value)
+  # y <- tmp$y_value - mean(tmp$y_value)
+  # z <- tmp$z_value - mean(tmp$z_value)
+  # 
+  # del <- NULL
+  # for(j in 1:length(x)) {
+  #   if(abs(x[j]) > 1000 | abs(y[j]) > 1000 | abs(z[j]) > 1000) {
+  #     del <- c(del, j)
+  #   }
+  # }
+  # 
+  # if(!is.null(del))
+  #   tmp <- tmp[setdiff(1:nrow(tmp),c(del)),]
+  # 
+  # tmp <- data.frame(created = as.POSIXct(tmp$created), x = tmp$x_value, y = tmp$y_value, z = tmp$z_value)
+  # plotdf <- melt(tmp, id = "created")
+  # print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+  #         geom_line() +
+  #         ggtitle(paste("Boat_id:",ids[i])))  # 
+  tmpb <- data_xyz[data_xyz$boat_id == ids[i],]
+
+  x <- tmpb$x_value - mean(tmpb$x_value)
+  y <- tmpb$y_value - mean(tmpb$y_value)
+  z <- tmpb$z_value - mean(tmpb$z_value)
+  
+  tmpb$x_norm <- x
+  tmpb$y_norm <- y
+  tmpb$z_norm <- z
+
+  del <- NULL
+  for(j in 1:length(x)) {
+    if(abs(x[j]) > 1000 | abs(y[j]) > 1000 | abs(z[j]) > 1000) {
+      del <- c(del, j)
+    }
+  }
+
+  if(!is.null(del)) {
+    tmpb <- tmpb[setdiff(1:nrow(tmpb),c(del)),]
+    outliers <- rbind(outliers, tmpb[del,])
+  }
+    
+
+  tmp <- data.frame(created = as.POSIXct(tmpb$created), x = (tmpb$x_value), y = (tmpb$y_value), z = (tmpb$z_value))
+  plotdf <- melt(tmp, id = "created")
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+          geom_line() +
+          ggtitle(paste("Boat_id:",ids[i])))
+ 
+  # tmp <- data.frame(created = as.POSIXct(tmpb$created), shock = tmpb$shock, count = tmpb$count)
+  # plotdf <- melt(tmp, id = "created")
+  # print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+  #         geom_line() +
+  #         ggtitle(paste("Boat_id:",ids[i])))
+}
+```
+
+Get runs from shock data
+```{r}
+data_sc <- merge_wb("firstclass_may.csv", sensor_name = "Shock Count")
+data_x <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration")
+data_y <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 1")
+data_z <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 2")
+data_sc$shock <- sqrt(data_x$value^2 + data_y$value^2 + data_z$value^2)
+data_sc <- clean_data(data_sc)
+rm(data_x, data_y, data_z)
+```
+
+```{r}
+boat <- data_sc
+
+ids <- unique(boat$boat_id)
+ids <- ids[order(ids)]
+
+boat <- boat[boat$boat_id == ids[9]]
+boat$numcreated <- as.numeric(as.POSIXct(boat$created))
+
+diff <- NULL
+
+for(i in 2:nrow(boat)) {
+  diff <- rbind(diff, as.numeric(boat[i,"numcreated"]) - as.numeric(boat[(i-1),"numcreated"]))
+}
+
+runs_speed <- find_runs(boat$speed)
+runs_shock <- find_runs_shock(boat$numcreated)
+
+tmp <- boat
+for(j in 1:length(runs_speed)) {
+  runs_speed[j] <- as.POSIXct(as.character(tmp[runs_speed[j],"created"]))
+}
+
+tmp <- data.frame(created = as.POSIXct(tmp$created), count = tmp$value, shock = tmp$shock)
+plotdf <- melt(tmp, id = "created")
+  
+png(filename = "graph_01.png", height = 2048, width = 2048, units = "px")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+      geom_line() +
+      ggtitle(paste("Boat_id:",ids[i])) + 
+      geom_vline(xintercept = runs_speed)
+dev.off()
+
+tmp <- boat
+for(j in 1:length(runs_shock)) {
+  runs_shock[j] <- as.POSIXct(as.character(tmp[runs_shock[j],"created"]))
+}
+
+tmp <- data.frame(created = as.POSIXct(tmp$created), count = tmp$value, shock = tmp$shock)
+plotdf <- melt(tmp, id = "created")
+  
+png(filename = "graph_02.png", height = 2048, width = 2048, units = "px")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+      geom_line() +
+      ggtitle(paste("Boat_id:",ids[i])) + 
+      geom_vline(xintercept = runs_shock, color = "blue")
+dev.off()
+
+rm(boat)
+```
+
+Complete sensor analysis
+```{r}
+data <- fread("firstclass_may.csv")
+data <- clean_data_full(data)
+
+data_count <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock Count")
+data_amplitude <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock amplitude")
+data_voltage <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage")
+data_voltage1 <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage 1")
+data_x <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration")
+data_y <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 1")
+data_z <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 2")
+
+data_full <- rbind(data_count, data_amplitude, data_voltage, data_voltage1)
+data_full <- clean_data_full(data_full)
+
+data_xyz <- rbind(data_x, data_y, data_z, data_count, data_amplitude)
+data_xyz <- clean_data_full(data_xyz)
+```
+
+```{r}
+idx <- 9
+data <- data_full
+# data <- data_xyz
+
+sensors <- unique(data$name)
+sensors <- sensors[order(sensors)]
+ids <- unique(data$boat_id)
+ids <- ids[order(ids)]
+
+boat <- data[data$boat_id == ids[idx], ]
+# boat <- boat[boat$created > as.POSIXct("2017-05-14T00:00:00Z") & boat$created < as.POSIXct("2017-05-15T00:00:00Z"), ]
+values <- NULL
+values <- data.frame(
+  created = boat[boat$name == "Shock amplitude","created"],
+  name = rep("wind_speed", nrow(boat[boat$name == "Shock amplitude"])),
+  value = boat[boat$name == "Shock amplitude","wind_speed"]
+)
+
+colnames(values) <- c("created","name","value")
+j <- 0
+
+sensors <- c("Shock Count","Shock amplitude","Battery Voltage","Battery Voltage 1")
+# sensors <- c("Shock amplitude","Acceleration","Acceleration 1","Acceleration 2")
+
+for(i in 1:length(sensors)) {
+  # if(sensors[i] == "Operator ID" | sensors[i] == "Trigger event type")
+  #   i <- i + 1
+
+  tmp <- boat[boat$name == sensors[i], c("created","name","value")]
+  
+  if(sensors[i] == "Shock Count" | sensors[i] == "Shock amplitude") {
+    tmp$value <- tmp$value / 1000
+  } else {
+    tmp$value <- tmp$value - 7.5
+  }
+
+  # tmp$value <- (tmp$value - mean(tmp$value)) / sd(tmp$value) + 50 * j
+  
+  values <- rbind(values, tmp)
+  j <- j + 1    
+
+}
+
+values$created <- as.POSIXct(values$created)
+colnames(values) <- c("created","variable","value")
+plotdf <- values
+
+# plotdf <- melt(tmp, id = "created")
+
+# png(filename = "graph_04.png", height = 2048, width = 2048, units = "px")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+      geom_line() +
+      ggtitle(paste("Boat_id:",ids[idx]))
+# dev.off()
+```
+
+Outliers
+```{r, message=FALSE}
+data <- fread("firstclass_may.csv")
+data <- clean_data_full(data)
+
+data_amplitude <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock amplitude")
+
+shock <- data_amplitude
+colnames(shock)[colnames(shock) == "value"] <- "shock"
+shock <- clean_data(shock)
+
+shock$wind_speed_norm <- (shock$wind_speed - mean(shock$wind_speed) / sd(shock$wind_speed))
+
+run <- NULL
+stat <- NULL
+
+ids <- unique(shock$boat_id)
+ids <- ids[order(ids)]
+
+for(i in 1:length(ids)) {
+  cond <- shock$boat_id == ids[i]
+  
+  tmp <- shock[cond, ]  
+  
+  run <- rbind(run, get_run(tmp))
+  stat <- rbind(stat, get_stat(tmp))
+}
+
+# rm(ids, cond, tmp, i)
+```
+
+```{r, warning=FALSE, message=FALSE}
+run$shock <- run$shock - mean(run$shock)
+stat$shock <- stat$shock - mean(stat$shock)
+
+run_out <- run[abs(run$shock) > 1000, ]
+stat_out <- stat[abs(stat$shock) > 1000, ]
+
+ggplot(run_out, aes(run_out$shock)) + geom_histogram(bins = 8) + ggtitle("Run outliers")
+ggplot(stat_out, aes(stat_out$shock)) + geom_histogram(bins = 8) + ggtitle("Stat outliers")
+
+outliers <- rbind(run_out, stat_out)
+
+oneDevice <- outliers
+# Get a bounding box
+invisible(sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y))
+invisible(map <- qmap(location = sbbox, zoom = 9, scale = 1, center))
+
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 2, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow")
+
+oneDevice <- stat_out
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 2, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow")
+
+oneDevice <- run_out
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 2, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow")
+
+# tmp <- data[as.POSIXct(data$created) == as.POSIXct("2017-05-14 08:32:31+00"),]
+
+# outliers$wind_speed_norm <- (outliers$wind_speed - mean(outliers$wind_speed)) / sd(outliers$wind_speed)
+
+ggplot(outliers, aes(outliers$sailpoint)) + geom_histogram(stat = "count") + ggtitle("Sailpoint")
+ggplot(outliers, aes(outliers$wind_speed)) + geom_histogram(bins = 8) + ggtitle("Wind speed")
+ggplot(outliers, aes(outliers$wind_speed_norm)) + geom_histogram(bins = 8) + ggtitle("Wind speed normalized")
+ggplot(outliers, aes(outliers$shock)) + geom_histogram(bins = 8) + ggtitle("Shock")
+ggplot(outliers, aes(outliers$speed)) + geom_histogram(bins = 8) + ggtitle("Speed")
+ggplot(outliers, aes(outliers$time)) + geom_histogram(bins = 16) + ggtitle("Time of day")
+
+ggplot(outliers, aes(x = speed, y = shock)) + geom_point()
+ggplot(outliers, aes(x = time, y = shock)) + geom_point()
+# ggplot(outliers, aes(x = sailpoint, y = shock)) + geom_point()
+ggplot(outliers, aes(x = boat_id, y = shock)) + geom_point()
+ggplot(outliers, aes(x = wind_speed, y = shock)) + geom_point()
+ggplot(outliers, aes(x = wind_speed_norm, y = shock)) + geom_point()
+
+krma <- outliers[outliers$sailpoint == "KRMA" & outliers$speed > 0, ]
+premec <- outliers[outliers$sailpoint == "PREMEC" & outliers$speed > 0, ]
+levi_bok <- outliers[outliers$sailpoint == "LEVI_BOK" & outliers$speed > 0, ]
+desni_bok <- outliers[outliers$sailpoint == "DESNI_BOK" & outliers$speed > 0, ]
+
+idx <- 1877
+oneDevice <- run[run$boat_id == idx, ]
+
+png(filename="test_03.png", width=4096,height=4096,units="px",res=100)
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 1) +
+  geom_point(data = premec[premec$boat_id == idx, ], aes(x = st_x, y = st_y), color = "blue", size = 1)+
+  geom_point(data = krma[krma$boat_id == idx, ], aes(x = st_x, y = st_y), color = "red", size = 1) +
+  geom_point(data = levi_bok[levi_bok$boat_id == idx, ], aes(x = st_x, y = st_y), color = "orange", size = 1) +
+  geom_point(data = desni_bok[desni_bok$boat_id == idx, ], aes(x = st_x, y = st_y), color = "green", size = 1)
+dev.off()
+
+rm(map, sbbox, oneDevice, krma, premec, levi_bok, desni_bok, data, data_amplitude)
+```
+Krma - pri manevru se zgodi, da jadro zaniha z ene na drugo stran, kar povzoci sunek (povezi outlierje pri katerih je sailpoint == "KRMA" s trackom)
+
+Outliers time of day
+```{r}
+data_amplitude <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock amplitude")
+
+shock <- data_amplitude
+colnames(shock)[colnames(shock) == "value"] <- "shock"
+shock <- clean_data(shock)
+
+```
+
+```{r}
+tmpb <- shock
+ids <- unique(tmpb$boat_id)
+
+tmpt <- NULL
+
+for(i in 1:length(ids)) {
+  tmp <- tmpb[tmpb$boat_id == ids[i],]
+  tmp <- tmp[order(created), ]
+  
+  runt <- NULL
+  
+  runs <- find_runs(tmp$speed)
+  if(!is.null(runs)) {
+    for(j in seq(1,length(runs),2)) {
+      tmpr <- tmp[runs[j]:runs[(j+1)] - 1,]    
+      
+      tmpr$start_time <- rep(as.character(tmpr[1, "created"]), nrow(tmpr))
+      tmpr$end_time <- rep(as.character(tmpr[nrow(tmpr), "created"]), nrow(tmpr))
+      
+      runt <- rbind(runt, tmpr)
+      
+    }    
+  }
+
+  
+  tmpt <- rbind(tmpt, runt)
+  
+  print(
+    ggplot(tmp, aes(x = as.POSIXct(created), y = shock)) + geom_line(color = "pink")
+  )
+}
+
+tmpt$time_from_start <- as.POSIXct(tmpt$created) - as.POSIXct(tmpt$start_time)
+tmpt$time_to_end <- as.POSIXct(tmpt$end_time) - as.POSIXct(tmpt$created)
+
+
+tmpt$time_from_start <- tmpt$time_from_start / 60 
+tmpt$time_to_end <- tmpt$time_to_end / 60
+tmpt$from_marine <- ifelse(tmpt$time_from_start < tmpt$time_to_end, tmpt$time_from_start, tmpt$time_to_end)
+
+
+tmpt$shock_norm <- tmpt$shock - mean(tmpt$shock)
+
+outliers <- tmpt[abs(tmpt$shock_norm) > 1000, ]
+
+ggplot(outliers, aes(x = from_marine)) + geom_histogram(bins = 12) + geom_vline(xintercept = mean(outliers$from_marine), color = "red")
+```
+
+
+```{r}
+data_xyz <- fread("firstclass_may.csv")
+data_xyz <- clean_data_full(data_xyz)
+
+data_amplitude <- data_xyz[data_xyz$name == "Shock amplitude", ]
+data_count <- data_xyz[data_xyz$name == "Shock Count", ]
+data_voltage <- data_xyz[data_xyz$name == "Battery Voltage",]
+```
+
+```{r}
+tmpa <- data_amplitude
+tmpc <- data_count
+tmpv <- data_voltage
+
+ids <- unique(tmpa$boat_id)
+ids <- ids[order(ids)]
+ids <- ids[c(1,4:10)]
+
+tmpa$value <- abs(tmpa$value - mean(tmpa$value))
+tmpc$value <- tmpc$value / 6
+tmpv$value <- tmpv$value * 100 - 500
+
+all_outliers <- NULL
+
+for(i in 1:length(ids)) {
+
+  tmp <- tmpa[tmpa$boat_id == ids[i], ]
+  tmp <- tmp[order(created),]
+  # tmp$value <- tmp$value - mean(tmp$value)
+  outliers <- tmp[tmp$value > 1000, ]
+  all_outliers <- rbind(all_outliers, outliers)
+  
+  runs <- find_runs(tmp$speed)
+  
+  day1 <- as.POSIXct("2017-05-14 00:00:00+00")
+  day2 <- as.POSIXct("2017-05-15 00:00:00+00")
+  day3 <- as.POSIXct("2017-05-16 00:00:00+00")
+  day4 <- as.POSIXct("2017-05-17 00:00:00+00")
+
+  b1 <- NULL
+  b2 <- NULL
+  b3 <- NULL
+  b4 <- NULL
+  
+  if(!is.null(runs)) {
+    for(j in 1:length(runs)) {
+      if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day2) {
+        b1 <- c(b1, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day3) {
+        b2 <- c(b2, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day4) {
+        b3 <- c(b3, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else {
+        b4 <- c(b4, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      }
+    }
+  }
+    
+  values <- rbind(
+    tmpa[tmpa$boat_id == ids[i], c("created", "name", "value")],
+    tmpc[tmpc$boat_id == ids[i], c("created", "name", "value")],
+    tmpv[tmpv$boat_id == ids[i], c("created", "name", "value")]
+  )
+  
+  colnames(values) <- c("created", "variable", "value")
+  values$created <- as.POSIXct(values$created)
+  
+  tmp1 <- values[values$created > day1 & values$created <= day2,]
+  tmp2 <- values[values$created > day2 & values$created <= day3,]
+  tmp3 <- values[values$created > day3 & values$created <= day4,]
+  tmp4 <- values[values$created > day4,]
+
+  
+  out1 <- NULL
+  out2 <- NULL
+  out3 <- NULL
+  out4 <- NULL
+  
+  val1 <- NULL
+  val2 <- NULL
+  val3 <- NULL
+  val4 <- NULL
+  
+  com1 <- NULL
+  com2 <- NULL
+  com3 <- NULL
+  com4 <- NULL
+    
+  out1 <- outliers[outliers$created > day1 & outliers$created <= day2, "created"]
+  out2 <- outliers[outliers$created > day2 & outliers$created <= day3, "created"]
+  out3 <- outliers[outliers$created > day3 & outliers$created <= day4, "created"]
+  out4 <- outliers[outliers$created > day4, "created"]
+    
+  val1 <- outliers[outliers$created > day1 & outliers$created <= day2, "value"]
+  val2 <- outliers[outliers$created > day2 & outliers$created <= day3, "value"]
+  val3 <- outliers[outliers$created > day3 & outliers$created <= day4, "value"]
+  val4 <- outliers[outliers$created > day4, "value"]
+  
+  print(i)
+  if(nrow(out1) > 0) {
+    out1 <- (as.POSIXct(as.vector(unlist(out1))))
+    val1 <- as.numeric(unlist(val1))
+    com1 <- data.frame(x = out1, y = val1)
+  } else {
+    out1 <- NULL
+    val1 <- NULL
+    com1 <- NULL
+  }
+  if(nrow(out2) > 0) {
+    out2 <- (as.POSIXct(as.vector(unlist(out2))))
+    val2 <- as.numeric(unlist(val2))
+    com2 <- data.frame(x = out2, y = val2)
+  } else {
+    out2 <- NULL
+    val2 <- NULL
+    com2 <- NULL
+  }
+  if(nrow(out3) > 0) {
+    out3 <- (as.POSIXct(as.vector(unlist(out3))))
+    val3 <- as.numeric(unlist(val3))
+    com3 <- data.frame(x = out3, y = val3)
+  } else {
+    out3 <- NULL
+    val3 <- NULL
+    com3 <- NULL
+  }
+  if(nrow(out4) > 0) {
+    out4 <- (as.POSIXct(as.vector(unlist(out4))))
+    val4 <- as.numeric(unlist(val4))
+    com4 <- data.frame(x = out4, y = val4)
+  } else {
+    out4 <- NULL
+    val4 <- NULL
+    com4 <- NULL
+  }
+    
+  com <- rbind(com1, com2, com3, com4)
+    
+  output <- 0
+  size <- 4
+  
+  if(output == 1)
+    png(filename = paste("time_of_day/boat_",ids[i],"_0.png", sep = ""), height = 2048, width = 2048, units = "px")
+  if(is.null(c(b1, b2, b3, b4)) & is.null(c(out1, out2, out3, out4))) {
+    print(ggplot(values, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])))
+  } else if(is.null(c(b1, b2, b3, b4))) {
+    print(
+      ggplot(values, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com, aes(x = x, y = y), color = "red", size = size)
+    )
+  } else if(is.null(c(out1, out2, out3, out4))) {
+    print(
+      ggplot(values, aes(x = created, y = value, colour = variable)) + geom_line() + geom_vline(xintercept = c(b1,b2,b3,b4)) + ggtitle(paste("Boat id:",ids[i]))
+    )
+  } else {
+    print(
+      ggplot(values, aes(x = created, y = value, colour = variable)) + geom_line()+ geom_vline(xintercept = c(b1,b2,b3,b4)) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com, aes(x = x, y = y), color = "red", size = size) 
+    )
+  }
+  if(output == 1)
+    dev.off()
+      
+  if(output == 1)
+    png(filename = paste("time_of_day/boat_",ids[i],"_1.png", sep = ""), height = 2048, width = 2048, units = "px")
+  if(is.null(b1) & is.null(out1)) {
+    print(ggplot(tmp1, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])))
+  } else if(is.null(b1)) {
+    print(
+      ggplot(tmp1, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com1, aes(x = x, y = y), color = "red", size = size)
+    )
+  } else if(is.null(out1)) {
+    print(
+      ggplot(tmp1, aes(x = created, y = value, colour = variable)) + geom_line() + geom_vline(xintercept = b1) + ggtitle(paste("Boat id:",ids[i]))
+    )
+  } else {
+    print(
+      ggplot(tmp1, aes(x = created, y = value, colour = variable)) + geom_line()+ geom_vline(xintercept = b1) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com1, aes(x = x, y = y), color = "red", size = size) 
+    )
+  }
+  if(output == 1)
+    dev.off()
+    
+  if(output == 1)
+    png(filename = paste("time_of_day/boat_",ids[i],"_2.png", sep = ""), height = 2048, width = 2048, units = "px")
+  if(is.null(b2) & is.null(out2)) {
+    print(ggplot(tmp2, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])))
+  } else if(is.null(b2)) {
+    print(
+      ggplot(tmp2, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com2, aes(x = x, y = y), color = "red", size = size)
+    )
+  } else if(is.null(out2)) {
+    print(
+      ggplot(tmp2, aes(x = created, y = value, colour = variable)) + geom_line() + geom_vline(xintercept = b2) + ggtitle(paste("Boat id:",ids[i]))
+    )
+  } else {
+    print(
+      ggplot(tmp2, aes(x = created, y = value, colour = variable)) + geom_line()+ geom_vline(xintercept = b2) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com2, aes(x = x, y = y), color = "red", size = size) 
+    )
+  }
+  if(output == 1)
+    dev.off()
+    
+  if(output == 1)
+    png(filename = paste("time_of_day/boat_",ids[i],"_3.png", sep = ""), height = 2048, width = 2048, units = "px")
+   if(is.null(b3) & is.null(out3)) {
+    print(ggplot(tmp3, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])))
+  } else if(is.null(b3)) {
+    print(
+      ggplot(tmp3, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com3, aes(x = x, y = y), color = "red", size = size)
+    )
+  } else if(is.null(out3)) {
+    print(
+      ggplot(tmp3, aes(x = created, y = value, colour = variable)) + geom_line() + geom_vline(xintercept = b3) + ggtitle(paste("Boat id:",ids[i]))
+    )
+  } else {
+    print(
+      ggplot(tmp3, aes(x = created, y = value, colour = variable)) + geom_line()+ geom_vline(xintercept = b3) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com3, aes(x = x, y = y), color = "red", size = size) 
+    )
+  }
+  if(output == 1)
+    dev.off()
+    
+  if(output == 1)
+    png(filename = paste("time_of_day/boat_",ids[i],"_4.png", sep = ""), height = 2048, width = 2048, units = "px")
+   if(is.null(b4) & is.null(out4)) {
+    print(ggplot(tmp4, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])))
+  } else if(is.null(b4)) {
+    print(
+      ggplot(tmp4, aes(x = created, y = value, colour = variable)) + geom_line() + ggtitle(paste("Boat id:",ids[i])) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com4, aes(x = x, y = y), color = "red", size = size)
+    )
+  } else if(is.null(out4)) {
+    print(
+      ggplot(tmp4, aes(x = created, y = value, colour = variable)) + geom_line() + geom_vline(xintercept = b4) + ggtitle(paste("Boat id:",ids[i]))
+    )
+  } else {
+    print(
+      ggplot(tmp4, aes(x = created, y = value, colour = variable)) + geom_line()+ geom_vline(xintercept = b4) + ggtitle(paste("Boat id:",ids[i])) + geom_point(data = com4, aes(x = x, y = y), color = "red", size = size) 
+    )
+  }
+  if(output == 1)
+    dev.off()
+
+}
+
+```
+
+```{r}
+tmpa <- data_amplitude
+tmpa <- tmpa[, c("boat_id","created","value","name")]
+
+tmpv <- data_voltage
+tmpv <- tmpv[, c("boat_id","created","value","name")]
+
+tmpa$value <- abs(tmpa$value - mean(tmpa$value))
+
+outliers <- tmpa[tmpa$value > 1000,]
+
+merged <- unique(merge(outliers, tmpv, by = c("boat_id","created")))[,c(1,2,3,5)]
+colnames(merged) <- c("boat_id","created","amplitude","voltage")
+org <- merged
+merged$voltage <- merged$voltage * 1000 - 10000
+
+merged <- melt(merged, id = c("boat_id","created"))
+
+summary(tmpv$value)
+
+ggplot(merged, aes(x = as.POSIXct(created), y = value, color = variable)) + geom_point()
+
+print(outliers)
+
+```
+
+
+Outliers wind speed
+```{r}
+tmpb <- rbind(run, stat)
+tmpr <- run
+tmps <- stat
+
+ids <- unique(tmpr$boat_id)
+
+tmpb$wind_speed_norm <- (tmpb$wind_speed - mean(tmpb$wind_speed)) / sd(tmpb$wind_speed)
+
+
+for(i in 1:length(ids)) {
+  tmp <- tmpb[tmpb$boat_id == ids[i], ]
+
+  print(ggplot(tmp, aes(x = as.POSIXct(created), y = wind_speed)) + geom_line())
+  print(ggplot(tmp, aes(x = as.POSIXct(created), y = wind_speed_norm)) + geom_line())
+}
+
+
+rm(tmpb, tmpr, tmps, i, ids)
+```
+
+Outliers component analysis
+```{r}
+data_x <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration")
+data_y <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 1")
+data_z <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 2")
+
+colnames(data_x)[colnames(data_x) == "value"] <- "shock"
+colnames(data_y)[colnames(data_y) == "value"] <- "shock"
+colnames(data_z)[colnames(data_z) == "value"] <- "shock"
+```
+
+```{r}
+ids <- unique(data_x$boat_id)
+ids <- ids[order(ids)]
+
+rout <- NULL
+sout <- NULL
+
+for(i in 1:length(ids)) {
+  condx <- data_x$boat_id == ids[i]
+  condy <- data_y$boat_id == ids[i]
+  condz <- data_z$boat_id == ids[i]
+  
+  tmpx <- data_x[condx,]
+  tmpy <- data_y[condy,]
+  tmpz <- data_z[condz,]
+  
+  tmp <- cbind(tmpx, tmpx$shock, tmpy$shock, tmpz$shock)
+  colnames(tmp)[colnames(tmp) == "V2"] <- "x"
+  colnames(tmp)[colnames(tmp) == "V3"] <- "y"
+  colnames(tmp)[colnames(tmp) == "V4"] <- "z"
+  tmp$shock <- sqrt(tmp$x^2 + tmp$y^2 + tmp$z^2)
+
+  tmpr <- get_run(tmp)  
+  tmps <- get_stat(tmp)  
+    
+  tmpr$mean <- mean(tmpr$shock)
+  tmpr$meanx <- mean(tmpr$x)
+  tmpr$meany <- mean(tmpr$y)
+  tmpr$meanz <- mean(tmpr$z)
+  
+  tmpr$delta <- abs(tmpr$shock - mean(tmpr$shock))
+  tmpr$deltax <- abs(tmpr$x - mean(tmpr$x))
+  tmpr$deltay <- abs(tmpr$y - mean(tmpr$y))
+  tmpr$deltaz <- abs(tmpr$z - mean(tmpr$z))
+  
+  rout <- rbind(rout, tmpr[tmpr$deltax > 1000 | tmpr$deltay > 1000 | tmpr$deltaz > 1000,])    
+
+  tmps$mean <- mean(tmps$shock)
+  tmps$meanx <- mean(tmps$x)
+  tmps$meany <- mean(tmps$y)
+  tmps$meanz <- mean(tmps$z)
+  
+  tmps$delta <- abs(tmps$shock - mean(tmps$shock))
+  tmps$deltax <- abs(tmps$x - mean(tmps$x))
+  tmps$deltay <- abs(tmps$y - mean(tmps$y))
+  tmps$deltaz <- abs(tmps$z - mean(tmps$z))
+  
+  sout <- rbind(sout, tmps[tmps$deltax > 1000 | tmps$deltay > 1000 | tmps$deltaz > 1000,])
+}
+
+rout <- rout[rout$created != as.POSIXct("2017-05-14 12:24:03+00") & rout$created != as.POSIXct("2017-05-14 12:05:06+00"),]
+
+rout$idx <- seq(1,nrow(rout),1)
+sout$idx <- seq(1,nrow(sout),1)
+
+for(i in 1:nrow(rout)) {
+  rout[i,"highest_delta"] <- which.max(c(rout[i,"deltax"], rout[i,"deltay"], rout[i,"deltaz"]))
+}
+for(i in 1:nrow(sout)) {
+  sout[i,"highest_delta"] <- which.max(c(sout[i,"deltax"], sout[i,"deltay"], sout[i,"deltaz"]))
+}
+
+rout$out_num <- 0
+rout$out_num <- ifelse(rout$deltax > 1000, rout$out_num + 1, rout$out_num)
+rout$out_num <- ifelse(rout$deltay > 1000, rout$out_num + 1, rout$out_num)
+rout$out_num <- ifelse(rout$deltaz > 1000, rout$out_num + 1, rout$out_num)
+
+sout$out_num <- 0
+sout$out_num <- ifelse(sout$deltax > 1000, sout$out_num + 1, sout$out_num)
+sout$out_num <- ifelse(sout$deltay > 1000, sout$out_num + 1, sout$out_num)
+sout$out_num <- ifelse(sout$deltaz > 1000, sout$out_num + 1, sout$out_num)
+
+rm(tmpx, tmpy, tmpz, condx, condy, condz, i, ids)
+
+tmp <- data.frame(created = seq(1,nrow(rout),1), x = rout$deltax, y = rout$deltay, z = rout$deltaz, boat_id = as.character(rout$boat_id))
+plotdf <- melt(tmp, id = c("created","boat_id"))
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable, shape = boat_id)) +
+        geom_point() +
+        ggtitle("Run")
+
+tmp <- data.frame(created = seq(1,nrow(sout),1), x = sout$deltax, y = sout$deltay, z = sout$deltaz, boat_id = as.character(sout$boat_id))
+plotdf <- melt(tmp, id = c("created","boat_id"))
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable, shape = boat_id)) +
+        geom_point()+
+        ggtitle("Stat")
+
+rm(plotdf, tmp, tmpr, tmps)
+
+rout$up_comp <- ifelse(rout$boat_id == 1877 | rout$boat_id == 1880, "-z", "+y")
+sout$up_comp <- ifelse(sout$boat_id == 1877 | sout$boat_id == 1880, "-z", "+y")
+
+rout <- rout[,c(31,seq(1,30,1),32,33,34)]
+sout <- sout[,c(31,seq(1,30,1),32,33,34)]
+
+rvout <- rout[rout$up_comp == "-z" & rout$deltaz > 1000 | rout$up_comp == "+y" & rout$deltay > 1000, ]
+svout <- sout[sout$up_comp == "-z" & sout$deltaz > 1000 | sout$up_comp == "+y" & sout$deltay > 1000, ]
+
+# print(paste("Run vertical %:",(nrow(rvout) / nrow(rout) * 100)))
+# print(paste("Stat vertical %:",(nrow(svout) / nrow(sout) * 100)))
+
+roout <- rout[-rvout$idx,]
+soout <- sout[-svout$idx,]
+
+ggplot(rvout, aes(rvout$out_num)) + geom_histogram(bins = 3)
+ggplot(svout, aes(svout$out_num)) + geom_histogram(bins = 3)
+
+# ggplot(rvout, aes(rvout$deltax)) + geom_histogram(bins = 8)
+# ggplot(rvout, aes(rvout$deltay)) + geom_histogram(bins = 8)
+# ggplot(rvout, aes(rvout$deltaz)) + geom_histogram(bins = 8)
+```
+
+```{r}
+ids <- unique(data_x$boat_id)
+ids <- ids[order(ids)]
+
+for(i in 1:length(ids)) {
+  
+  condx <- data_x$boat_id == ids[i]
+  condy <- data_y$boat_id == ids[i]
+  condz <- data_z$boat_id == ids[i]
+  
+  tmpx <- data_x[condx,]
+  tmpy <- data_y[condy,]
+  tmpz <- data_z[condz,]
+  
+  tmp <- cbind(tmpx, tmpx$shock, tmpy$shock, tmpz$shock)
+  colnames(tmp)[colnames(tmp) == "V2"] <- "x"
+  colnames(tmp)[colnames(tmp) == "V3"] <- "y"
+  colnames(tmp)[colnames(tmp) == "V4"] <- "z"
+  tmp$shock <- sqrt(tmp$x^2 + tmp$y^2 + tmp$z^2)
+  tmp$name <- NULL
+  
+  tmpr <- get_run(tmp)
+  tmps <- get_stat(tmp)
+  
+  tmp$delta_x <- abs(tmp$x - mean(tmps$x))
+  tmp$delta_y <- abs(tmp$y - mean(tmps$y))
+  tmp$delta_z <- abs(tmp$z - mean(tmps$z))
+  tmp$delta_shock <- abs(tmp$shock - mean(tmps$shock))
+  
+  tmpg <- data.frame(created = as.POSIXct(tmp$created), x = tmp$x, y = tmp$y, z = tmp$z)
+  plotdf <- melt(tmpg, id = c("created"))
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() +
+        ggtitle(paste("Boat_id:",ids[i])))  
+  
+  tmpg <- data.frame(created = as.POSIXct(tmp$created), x = tmp$delta_x, y = tmp$delta_y, z = tmp$delta_z)
+  plotdf <- melt(tmpg, id = c("created"))
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() +
+        ggtitle(paste("Boat_id:",ids[i])))
+  
+}
+
+rm(condx, condy, condz, i)
+```
+
+Correlate with weather data with automatic date detection
+```{r}
+merge_wb <- function(boat_path, directory = "GRIB/", boat_variables = "", sensor_name, boat_idx = -1) {
+  
+  ########################
+  # Main functions #######
+  ########################
+  
+  ### Required fields ###
+  # created -> timestemp (character)
+  # st_x -> longitude (numeric)
+  # st_y -> latitude (numeric)
+  # speed -> speed of travel (numeric)
+  # bearing -> direction of travel (numeric)
+
+  # DONE
+  boat_data_preparation <- function(boat_path, boat_variables, sensor_name, boat_idx) {
+    
+    if(boat_variables != "") {
+      boat_variables <- c("boat_id","created","st_x","st_y","speed","bearing","value", boat_variables)  
+    } else {
+      boat_variables <- c("boat_id","created","st_x","st_y","speed","bearing","value")
+    }
+    
+    boat <- fread(boat_path)
+    
+    if(boat_idx != -1) {
+      boat <- subset(boat, subset = name == sensor_name & boat_id == boat_idx, select = boat_variables)
+    } else {
+      boat <- subset(boat, subset = name == sensor_name, select = boat_variables)
+    }
+
+    boat <- na.omit(boat)
+    
+    boat$date <- as.POSIXct(boat$created, tz = "UTC")
+    
+    return(boat)
+  } 
+    
+  # DONE
+  weather_data_preparation <- function(weather_path) {
+    
+    # Take the GRIB path file and convert it to netcdf file
+    a <- grib2netcdf(weather_path, "tmpnc")
+    # Open the netcdf file
+    ncin <- nc_open("tmpnc")
+  
+    # Get all variable names
+    variables <- names(ncin[['var']])
+    
+    # Get Lon and Lat variables
+    lon <- ncvar_get(ncin, "lon")
+    lat <- ncvar_get(ncin, "lat")
+    
+    # Find the wind component names
+    i <- grep("component+", variables)
+    uvar <- variables[i[1]]
+    vvar <- variables[i[2]]
+
+    # Extract the u component of wind from the netcdf file
+    i <- 1
+    uvars <- c(uvar, "u-component_of_wind_height_above_ground","10_metre_U_wind_component_surface")
+    u_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        u_component_of_wind <- ncvar_get(ncin, uvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(u_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(uvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind u-component not found.")
+      }
+    }
+    
+    # Extract the v component of wind from the netcdf file
+    i <- 1
+    vvars <- c(vvar, "v-component_of_wind_height_above_ground","10_metre_V_wind_component_surface")
+    v_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        v_component_of_wind <- ncvar_get(ncin, vvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(v_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(vvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind v-component not found.")
+      }
+    }
+    
+    # Get the time variable name
+    time_var <- strsplit(as.character(ncatt_get(ncin, vvars[i], "coordinates")["value"]), split = " ")
+    time_var <- get_timevar(time_var)
+    # Extract the time variable from the netcdf file
+    time <- ncvar_get(ncin, time_var)
+    
+    # Find the starting time 
+    time_base <- as.POSIXct(unlist(strsplit(ncatt_get(ncin, time_var, "units")$value, split = " "))[3], tz = "UTC")
+
+    # Close and remove the netcdf file
+    nc_close(ncin)
+    file.remove("tmpnc")
+
+    # Prepare the dataframe for processing
+    weather.merge <- melt(u_component_of_wind)
+    # Change the column names 
+    colnames(weather.merge) <- c("lon","lat","time","u_comp")
+    # Insert longitude, latitude and v component into the dataframe
+    weather.merge$lon <- lon[weather.merge$lon]
+    weather.merge$lat <- lat[weather.merge$lat]
+    weather.merge$v_comp <- melt(v_component_of_wind)[ ,"value"]
+
+    # Prepare the time column for processing
+    weather.merge$time <- weather.merge$time - 1
+    # Set the starting time of the data set
+    basetime <- as.POSIXct(time_base, tz = "UTC", format = "%Y-%m-%d %H:%M:%S")
+    # Get the time interval
+    tint <- sort(time)[2] - sort(time[1])
+    # Insert time into the dataframe
+    weather.merge$date <- time_base + weather.merge$time * (3600 * tint)
+          
+    # Round longitude and latitude for easier data comparison later on
+    weather.merge$lon <- round(weather.merge$lon,3)
+    weather.merge$lat <- round(weather.merge$lat,3)
+    
+    # Calculate wind direction based on u and v component of wind
+    weather.merge$wind_direction <- atan2((weather.merge$u_comp * -1), (weather.merge$v_comp * -1)) * (180/pi)
+    weather.merge$wind_direction <- ifelse(weather.merge$wind_direction < 0, weather.merge$wind_direction + 360, weather.merge$wind_direction)
+    
+    # Calculate wind speed based on u and v component of wind
+    weather.merge$wind_speed <- sqrt(weather.merge$u_comp^2 + weather.merge$v_comp^2)
+    return(weather.merge)
+  }
+  
+  # DONE
+  merge_predictions <- function(time_limits, files) {
+    res <- NULL
+    
+    # Get all files from a directory and cut the file extension
+    dates <- substr(dir(paste(getwd(), "/", files, sep = "")),1,10)
+    # Get only the date of start and end of the route
+    start <- as.Date(time_limits[1])
+    stop <- as.Date(time_limits[2])
+
+    # Find correlating weather file with the start of the route
+    for(i in 1:length(dates)) {
+      if(start == dates[i]) {
+        start <- i
+        break
+      } else if(start < dates[i]) {
+        start <- i - 1
+        break
+      }
+    }
+    if(start == 0)
+      start <- 1
+    # Find correlating weather file with the end of the route
+    for(i in start:length(dates)) {
+      if(stop <= dates[i]) {
+        stop <- i
+        break
+      }
+      if(i == length(dates)) {
+        stop <- i
+      }
+    }
+    
+    # Paste the extension back to the results
+    weather_path <- paste(dates[start:stop], ".grb", sep = "")
+    
+    # Merge multiple weather prediction files (works with a single file as well)
+    for(i in 1:length(weather_path)) {
+      tmpw <- weather_data_preparation(paste(files, weather_path[i], sep = ""))
+      tmpw$set <- i
+      
+      res <- res[res$date < min(tmpw$date), ]
+      res <- rbind(res, tmpw)
+      print(paste("Weather file",weather_path[i],"successfully processed."))
+    }
+    return(res)
+  }
+  
+  # DONE
+  merge_data <- function(tmpb, tmpw) {
+    # Round longitude, latitude and date from boat dataset to the interval, provided by the weather dataset
+    tmpb$date <- as.POSIXct(roundToIntervalNoBarModified(as.numeric(tmpb$date), as.numeric(unique(tmpw$date))), origin = "1970-01-01 00:00:00", tz = "UTC")
+    tmpb$lon <- roundToIntervalNoBarModified(tmpb$st_x, sort(unique(tmpw$lon)))
+    tmpb$lat <- roundToIntervalNoBarModified(tmpb$st_y, sort(unique(tmpw$lat)))
+    
+    # Convert both data frames to data tables to reduce running time
+    df1 <- data.table(tmpb, key = c("lon","lat","date"))
+    df2 <- data.table(tmpw, key = c("lon","lat","date"))
+    # Merge the data
+    merged.data <- df2[df1]
+    
+    # Calculate the sailpoint (wind direction, relative to the boats bearing)
+    merged.data$sailpoint <- sailpoint2.2(merged.data)
+    
+    # Sort the data according to time
+    merged.data <- merged.data[order(merged.data$created), ]
+    return(merged.data)
+  }
+  ########################
+  # Auxiliary functions ##
+  ########################
+
+  roundToIntervalNoBarModified <- function(data, interval) {
+    for(i in 1:length(data)) {
+      data[i] = interval[which.min(abs(interval-data[i]))]
+    }
+    return(data)
+  }
+  
+  sailpoint2.2 <- function(df) {
+    # Some implementations fix
+    bea <- as.numeric(df$bearing)
+    wdir <- as.numeric(df$wind_direction)
+    # Set the angle for what to be considered front and back of the boat
+    premec <- 70
+    bok <- 110
+    # Convert bearing from 360 to 180 scale
+    df$bearing[df$bearing > 180] <- df$bearing[df$bearing > 180] - 360
+    # Calculate the angles between wind direction and bearing
+    angle <- bea - wdir
+    # Classify angles in four different classes (front, left side, right side, back)
+    pr <- ifelse(abs(angle) <= premec | abs(angle) >= 360 - premec, "PREMEC", "")
+    lb <- ifelse(angle >= ((360 - premec) * -1) & angle <= ((360 - bok) * -1) | 
+            angle >= premec & angle <= bok, "LEVI_BOK", "")  
+    db <- ifelse(angle >= (bok * -1) & angle <= (premec * -1) |
+            angle >= (360 - bok) & angle <= (360 - premec), "DESNI_BOK", "")
+    kr <- ifelse(abs(angle) >= bok & abs(angle) <= (360 - bok), "KRMA", "")
+    # Join the classes and return the result
+    return(paste(pr, lb, db, kr, sep = ""))
+  }
+  
+  grib2netcdf <- function(grib, out) {
+    # Call executed in CMD netcdfAll-4.6.10.jar has to be placed in the same folder as the project to work
+    (shell( 
+      paste("java -Xmx512m -classpath netcdfAll-4.6.10.jar ucar.nc2.dataset.NetcdfDataset -in ",grib," -out ",out, sep = ""),
+      intern = TRUE
+    ))  
+    # Remove files, other than the one we need to minimize the clutter
+    (file.remove(paste(grib,".gbx9", sep = "")))
+    (file.remove(paste(grib,".ncx3", sep = "")))
+  }
+  
+  get_timevar <- function(time_var) {
+    # Convert list to a vector
+    time_var <- unlist(time_var)
+    # Check for all known time variables, otherwise throw an error
+    if(any(time_var == "time")) {
+      return("time")
+    }
+    else if(any(time_var == "time1")) {
+      return("time1")
+    }
+    else if(any(time_var == "time2")) {
+      return("time2")
+    }
+    else {
+      stop("No time found.")
+    } 
+  }
+  ########################
+  # Execution ############
+  ########################
+  
+  # Prepare boat data frame
+  boat <- boat_data_preparation(boat_path, boat_variables, sensor_name, boat_idx)
+  print("Boat data preparation completed.")
+  # Import weather NCDF file and do some data processing
+  weather <- merge_predictions(time_limits = c(min(boat$date), max(boat$date)),
+                               files = directory)
+  print("Weather data preparation completed.")
+  # Merge the processed datasets according to time, longitude and latitude
+  merged <- merge_data(boat, weather)
+  print("Data merged.")
+  # Return the result 
+  return(merged)
+}
+```
+
+Rename weather files
+```{r}
+files <- dir("GRIB")
+
+for(i in 1:length(files)) {
+  start <- as.numeric(regexpr("2", files[i]))
+  file.rename(
+              from = paste("GRIB/", files[i], sep = ""),
+              to = paste("GRIB/", substr(files[i], start, start + 3),"-",substr(files[i],start + 4, start + 5),"-",substr(files[i], start + 6, start + 7), ".grb", sep = "")
+              )
+}
+
+rm(files, i, start)
+```
+
+Refined functions
+```{r}
+normalize <- function(x) {
+  return((x - mean(x)) / sd(x))
+}
+
+clean_data <- function(x) {
+  dirty <- NULL
+  for(i in 1:nrow(x)) {
+    if(!(x[i,"shock"] > 10000 & x[i,"bearing"] < 1 & x[i,"speed"] < 1)) {
+      # res <- rbind(res, x[i])
+    } else {
+      print(paste("Row removed!"))
+      print(paste("Boat ID:",x[i,"boat_id"],"Shock:",x[i,"shock"],"Bearing:",x[i,"bearing"],"Speed:",x[i,"speed"]))
+      dirty <- c(dirty, i)
+    }
+  }
+  if(is.null(dirty))
+    return(x)
+  else
+    return(x[-dirty,])
+}
+
+clean_data_full <- function(x) {
+  dirty <- NULL
+  tmp <- x[x$name == "Shock amplitude" | x$name == "Acceleration" | x$name == "Acceleration 1" | x$name == "Acceleration 2", ]
+  x <- x[x$name != "Shock amplitude",]
+  for(i in 1:nrow(tmp)) {
+    if(tmp[i,"speed"] < 1 & abs(tmp[i,"bearing"]) < 1 & tmp[i,"value"] > 10000) {
+      print(paste("Row removed!"))
+      print(paste("Boat ID:",tmp[i,"boat_id"],"Shock:",tmp[i,"value"],"Bearing:",tmp[i,"bearing"],"Speed:",tmp[i,"speed"]))
+      dirty <- c(dirty, i)
+    }
+  }
+  if(is.null(dirty))
+    return(rbind(x,tmp))
+  else
+    return(rbind(x, tmp[-dirty,]))
+}
+
+get_run <- function(tmpb) {
+  # Find parts of the route where the boat is actually moving
+  runs <- find_runs(tmpb$speed)
+  if(is.null(runs)) {
+    return(NULL)
+  }
+  # Concat all runs in one data frame and everything else into another
+  run <- NULL
+  for(i in seq(1,length(runs),2)) {
+    if(nrow(tmpb) == runs[i+1]) {
+      tmp <- tmpb[runs[i]:runs[i+1],]
+    } else {
+      tmp <- tmpb[runs[i]:(runs[i+1] - 1),]      
+    }
+    tmp$num <- i %/% 2 + 1
+    run <- rbind(run, tmp)
+  }
+  return(run)
+}
+
+get_stat <- function(tmpb) {
+  # Find parts of the route where the boat is actually moving
+  runs <- find_runs(tmpb$speed)
+  if(is.null(runs)) {
+    return(NULL)
+  }
+  # Concat all runs in one data frame and everything else into another
+  stat <- NULL
+  for(i in seq(1,length(runs),2)) {
+    # Stat
+    if(i == 1) {
+      stat <- tmpb[i:(runs[i] - 1),]
+      stat$num <- i
+    } else if(i == length(runs) - 1) {
+      tmp <- tmpb[runs[i-1]:(runs[i] - 1),]
+      tmp$num <- i%/%2 + 1
+      stat <- rbind(stat, tmp)
+      if(runs[i+1] != nrow(tmpb)) {
+        tmp <- tmpb[runs[i+1]:nrow(tmpb),]
+        tmp$num <- i%/%2 + 2
+        stat <- rbind(stat, tmp)        
+      }
+    } else {
+      tmp <- tmpb[runs[i-1]:(runs[i] - 1),]
+      tmp$num <- i%/%2 + 1
+      stat <- rbind(stat, tmp)
+    }
+  }
+  return(stat)
+}
+
+find_runs <- function(speed) {
+  s <- NULL
+  i <- 1
+  empty <- FALSE
+  while(speed[i] == 0 | speed[(i+1)] == 0 | speed[(i+2)] == 0) {
+    i <- i + 1
+    if((i + 2) >= length(speed)) {
+      empty <- TRUE
+      break
+    }
+  }
+  while(TRUE & !empty) {
+    s <- c(s, i)
+    while(TRUE) {
+      if((i + 2) > length(speed)) {
+        i <- length(speed)
+        break
+      }
+      if(speed[i] == 0 & speed[i + 1] == 0 & speed[i + 2] == 0) {
+        break
+      }
+      else {
+        i <- i + 1
+      }
+    }
+    s <- c(s, i)
+    if(i >= length(speed))
+      break
+    while(speed[i] == 0 | speed[(i+1)] == 0 | speed[(i+2)] == 0) {
+      i <- i +1
+      if((i + 2) > length(speed))
+        break
+    }
+  }
+  return(s)
+}
+```
+
+Boat wind speed (wind speed needs to be adjusted to the speed and direction of a travelling boat)
+```{r}
+to_xy <- function(mag, ang) {
+  if(ang <= 90) {
+    mask <- c(1,1)
+  } else if(ang <= 180) {
+    ang <- ang - 90
+    mask <- c(1,-1)
+  } else if(ang <= 270) {
+    ang <- ang - 180
+    mask <- c(-1,-1)
+  } else if(ang < 360) {
+    ang <- ang - 270
+    mask <- c(-1,1)
+  }
+  return(c(mag * cos(pi/2 - ang), mag * cos(ang)))
+}
+
+adjust_windspeed2.0 <- function(x, sped_units = "knots") {
+  if(speed_units == "knots") {
+    speed <- x$speed * 0.51444
+  } else {
+    speed <- x$speed
+  }
+  if(windspeed_units == "knots") {
+    wind_speed <- x$wind_speed * 0.51444
+  } else {
+    wind_speed <- x$wind_speed
+  }
+  
+  fi <- x$bearing - x$wind_direction
+
+  for(i in 1:nrow(x)) {
+    xb <- to_xy(x[i,"speed"], x[i,"bearing"])[1]
+    if(abs(fi[i]) < 90 | abs(fi[i]) > 270) {
+      
+      
+      
+      print(paste("Subtract",fi[i]))
+    } else if(abs(fi[i]) > 90 & abs(fi[i]) < 270) {
+      print(paste("Add",fi[i]))
+    } else {
+      print(paste("Uncahnged",fi[i]))
+    }
+  }
+}
+
+boat$boat_windspeed <- adjust_windspeed2.0(boat)
+```
+
+
+```{r}
+  tmpx <- data_x[condx, ]  
+  tmpx <- get_run(tmpx)
+  tmpx$mean <- rep(mean(tmpx$shock), nrow(tmpx))
+  tmpx$delta <- abs(tmpx$shock - mean(tmpx$shock))
+  routx <- rbind(routx, tmpx[abs(tmpx$delta) > 1000, ])
+  tmpx <- data_x[condx, ]
+  tmpx <- get_stat(tmpx)
+  tmpx$mean <- rep(mean(tmpx$shock), nrow(tmpx))
+  tmpx$delta <- abs(tmpx$shock - mean(tmpx$shock))
+  soutx <- rbind(soutx, tmpx[abs(tmpx$delta) > 1000, ])   
+  
+  tmpy <- data_y[condy, ]  
+  tmpy <- get_run(tmpy)
+  tmpy$mean <- rep(mean(tmpy$shock), nrow(tmpy))
+  tmpy$delta <- abs(tmpy$shock - mean(tmpy$shock))
+  routy <- rbind(routy, tmpy[abs(tmpy$delta) > 1000, ])
+  tmpy <- data_y[condy, ]
+  tmpy <- get_stat(tmpy)
+  tmpy$mean <- rep(mean(tmpy$shock), nrow(tmpy))
+  tmpy$delta <- abs(tmpy$shock - mean(tmpy$shock))
+  souty <- rbind(souty, tmpy[abs(tmpy$delta) > 1000, ])  
+  
+  tmpz <- data_z[condz, ]  
+  tmpz <- get_run(tmpz)
+  tmpz$mean <- rep(mean(tmpz$shock), nrow(tmpz))
+  tmpz$delta <- abs(tmpz$shock - mean(tmpz$shock))
+  routz <- rbind(routz, tmpz[abs(tmpz$delta) > 1000, ])
+  tmpz <- data_z[condz, ]
+  tmpz <- get_stat(tmpz)
+  tmpz$mean <- rep(mean(tmpz$shock), nrow(tmpz))
+  tmpz$delta <- abs(tmpz$shock - mean(tmpz$shock))
+  soutz <- rbind(soutz, tmpz[abs(tmpz$delta) > 1000, ]) 
+```
+
+Stat bearing analysis
+```{r}
+tmp <- stat
+tmp_out <- stat_out
+
+bea <- unique(tmp$bearing)
+
+bt <- sort(table(tmp$bearing), decreasing = TRUE)
+
+# bt[1] / nrow(tmp) * 100
+# cat("\n")
+# bt[2] / nrow(tmp) * 100
+# cat("\n")
+# bt[3] / nrow(tmp) * 100
+# cat("\n")
+# bt[4] / nrow(tmp) * 100
+# cat("\n")
+# bt[1]
+# cat("\n")
+# bt[2]
+# cat("\n")
+# bt[3]
+# cat("\n")
+# bt[4]
+# cat("\n")
+# 
+summary(as.numeric(bt))
+
+ggplot(tmp, aes(tmp$bearing)) + geom_histogram(bins = length(bt)) + geom_hline(yintercept = mean(bt), color = "red")
+ggplot(tmp, aes(tmp$bearing)) + geom_histogram(bins = 36)
+# tmp <- run
+# rt <- sort(table(tmp$bearing), decreasing = TRUE)
+# 
+# ggplot(tmp, aes(tmp$bearing)) + geom_histogram(bins = length(rt))
+# ggplot(tmp, aes(tmp$bearing)) + geom_histogram(bins = 8)
+
+```
+
+Classify outliers
+```{r}
+data <- fread("firstclass_may.csv")
+x <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration")
+y <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 1")
+z <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 2")
+count <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock Count")
+voltage <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage")
+
+colnames(x)[colnames(x) == "value"] <- "x"
+colnames(y)[colnames(y) == "value"] <- "y"
+colnames(z)[colnames(z) == "value"] <- "z"
+
+xyz <- data.frame(
+  created = x$created,
+  boat_id = x$boat_id,
+  speed = x$speed,
+  bearing = x$bearing,
+  wind_speed = x$wind_speed,
+  st_x = x$st_x,
+  st_y = x$st_y,
+  x = x$x,
+  y = y$y,
+  z = z$z,
+  shock = sqrt(x$x^2 + y$y^2 + z$z^2),
+  count = count$value,
+  sailpoint = x$sailpoint,
+  class = rep(as.character(NA), nrow(x)),
+  color = rep(as.character("red"), nrow(x)),
+  categories_num = rep(0, nrow(x)),
+              stringsAsFactors = FALSE
+)
+
+# xyz$shock <- abs(xyz$shock - mean(xyz$shock))
+```
+
+
+```{r}
+tmpx <- xyz
+tmpv <- voltage
+
+ids <- c(1873, 1876, 1877, 1878, 1879, 1880, 1881, 1882)
+
+tmpx <- tmpx[is.element(tmpx$boat_id, ids), ]
+tmpv <- tmpv[is.element(tmpv$boat_id, ids), ]
+tmpx$voltage <- tmpv[, "value"]
+tmpx$created <- as.POSIXct(tmpx$created)
+tmpx$start_time <- rep(as.POSIXct("1970-01-01 00:00:00"), nrow(tmpx))
+tmpx$end_time <- rep(as.POSIXct("1970-01-01 00:00:00"), nrow(tmpx))
+
+tmpt <- NULL
+
+for(i in 1:length(ids)) {
+  tmpb <- tmpx[tmpx$boat_id == ids[i], ]
+  tmpb <- tmpb[order(tmpb$created), ]
+  
+  runs <- find_runs(tmpb$speed)
+  
+  if(length(runs) > 0) {
+    tmpr <- NULL
+    tmp <- tmpb[1:(runs[1]-1), ]
+    tmp$end_time <- rep(tmpb[runs[1], "created"], nrow(tmp))
+    tmpr <- rbind(tmpr, tmp)
+    
+    for(j in 1:(length(runs) - 1)) {
+      if(j != length(runs) - 1) {
+        tmp <- tmpb[runs[j]:(runs[(j+1)]-1), ]  
+        tmp$end_time <- rep(tmpb[runs[(j+1)], "created"], nrow(tmp))
+      } else {
+        tmp <- tmpb[runs[j]:runs[(j+1)], ]
+      }
+      tmp$start_time <- rep(tmpb[runs[j], "created"], nrow(tmp))
+      tmpr <- rbind(tmpr, tmp)
+    } 
+  }
+  tmpt <- rbind(tmpt, tmpr)
+}
+tmpt$start_time <- as.POSIXct(ifelse(tmpt$start_time == as.POSIXct("1970-01-01 00:00:00"), NA, tmpt$start_time), origin = "1970-01-01 00:00:00")
+tmpt$end_time <- as.POSIXct(ifelse(tmpt$end_time == as.POSIXct("1970-01-01 00:00:00"), NA, tmpt$end_time), origin = "1970-01-01 00:00:00")
+
+tmpt$start_delta <- round(abs(tmpt$start_time - tmpt$created)/60, digits = 2)
+tmpt$end_delta <- round(abs(tmpt$end_time - tmpt$created)/60, digits = 2)
+
+tmpx <- tmpt
+
+tmpx$shock <- abs(tmpx$shock - mean(tmpx$shock))
+tmpx$count_delta = rep(0, nrow(tmpx))
+tmpx$voltage_delta = rep(0, nrow(tmpx))
+
+for(i in 2:nrow(tmpx)) {
+    tmpx[i, "count_delta"] <- abs(tmpx[i, "count"] - tmpx[i-1, "count"])
+    tmpx[i, "voltage_delta"] <- abs(tmpx[i, "voltage"] - tmpx[i-1, "voltage"])
+}
+
+out <- tmpx[tmpx$shock > 1000, ]
+
+for(i in 1:nrow(out)) {
+  if(out[i, "speed"] == 0 & out[i, "bearing"] <= 0.1  & out[i, "count"] == 0 | as.numeric(substr(out[i, "created"], 12, 13)) < 6 & out[i, "speed"] == 0 & out[i, "count"] == 0 | as.numeric(substr(out[i, "created"], 12, 13)) > 22 & out[i, "speed"] == 0 & out[i, "count"] == 0) {
+    out[i, "class"] <- "Device reset"
+    out[i, "color"] <- "blue"
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(out[i, "count_delta"] > 3000 | out[i, "count"] == 6000) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "Count delta"
+      out[i, "color"] <- "orange"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", Count delta")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(out[i, "wind_speed"] > 5) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "Wind speed"
+      out[i, "color"] <- "green"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", Wind speed")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(!is.na(out[i, "start_delta"]) & out[i, "start_delta"] < 30) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "After start"
+      out[i, "color"] <- "yellow"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", After start")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(!is.na(out[i, "end_delta"]) & out[i, "end_delta"] < 30) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "Before start"
+      out[i, "color"] <- "purple"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", Before start")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(out[i, "voltage_delta"] > 0.2) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "Voltage delta"
+      out[i, "color"] <- "gold"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", Voltage delta")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  } 
+  if(out[i, "speed"] > 9) {
+    if(out[i, "categories_num"] == 0) {
+      out[i, "class"] <- "Speed"
+      out[i, "color"] <- "pink"
+    } else {
+      out[i, "class"] <- paste(out[i, "class"], ", Speed")
+    }
+    out[i, "categories_num"] <- out[i, "categories_num"] + 1
+  }
+}
+
+not_solved <- out[out$categories_num == 0, ]
+solved <- out[out$categories_num != 0, ]
+
+num <- nrow(out[!is.na(out$class),])
+perc <- round(num/nrow(out)*100, digits = 2)
+print(paste("Number of solved: ",num, sep = ""))
+print(paste("Percentage of solved: ",perc,"%", sep = ""))
+
+stats <- data.frame(
+  class = c("After start", "Before start", "Count delta", "Device reset", "Speed", "Voltage delta", "Wind speed"), 
+  percentage = numeric(length = 7)
+  )
+
+for(i in 1:nrow(stats)) {
+  perc <- out[grep(stats[i, "class"], out$class), ]
+  stats[i, "percentage"] <- round(nrow(perc)/nrow(solved) * 100, digits = 2)
+}
+
+for(i in 1:nrow(stats)) {
+  print(paste("Percentage of outliers classified as ", stats[i, "class"]," is: ",stats[i, "percentage"],"%", sep = ""))
+}
+
+print(paste("Percetnage of outliers 30 min before or after departure or arrival is: ", stats[stats$class == "After start", "percentage"] + stats[stats_sep$class == "Before start", "percentage"],"%", sep = ""))
+
+rm(tmp, tmpb, tmpr, tmpt, tmpv, tmpx, i, j, num, perc, runs)
+```
+ | as.numeric(substr(out[i, "created"], 12, 13)) < 6 & out[i, "speed"] == 0 & out[i, "count"] == 0 | as.numeric(substr(out[i, "created"], 12, 13)) > 22 & out[i, "speed"] == 0 & out[i, "count"] == 0
+
+Outliers visualization
+```{r}
+daat <- data[is.element(data$boat_id, ids), ]
+
+tmpa <- daat[daat$name == "Shock amplitude", ]
+tmpc <- daat[daat$name == "Shock Count", ]
+tmpv <- daat[daat$name == "Battery Voltage",]
+visx <- daat[daat$name == "Acceleration"]
+visy <- daat[daat$name == "Acceleration 1"]
+visz <- daat[daat$name == "Acceleration 2"]
+
+ids <- ids[order(ids)]
+
+tmpa$value <- abs(tmpa$value - mean(tmpa$value))
+tmpc$value <- tmpc$value / 10
+tmpv$value <- tmpv$value * 100 - 500
+
+tmpa$created <- as.POSIXct(tmpa$created)
+tmpc$created <- as.POSIXct(tmpc$created)
+tmpv$created <- as.POSIXct(tmpv$created)
+
+all_outliers <- NULL
+
+for(i in 1:length(ids)) {
+
+  tmp <- tmpa[tmpa$boat_id == ids[i], ]
+  tmp <- tmp[order(created),]
+
+  tout <- out[out$boat_id == ids[i], ]
+
+  runs <- find_runs(tmp$speed)
+
+  b <- as.POSIXct(unlist(as.list(tmp[runs, "created"])), origin = "1970-01-01 00:00:00")
+  
+  
+  size <- 4
+  per <- round(nrow(tout[tout$color != "red",])/nrow(tout) * 100, digits = 2)
+    
+  tmpa <- tmpa[tmpa$value < 10000, ]
+  tout <- tout[tout$shock < 10000, ]
+
+  vx <- visx[visx$boat_id == ids[i], ]
+  vy <- visy[visy$boat_id == ids[i], ]
+  vz <- visz[visz$boat_id == ids[i], ]
+  
+  vx$value <- vx$value - mean(vx$value)
+  vy$value <- vy$value - mean(vy$value)
+  vz$value <- vz$value - mean(vz$value)
+  
+  vx$value <- abs(vx$value)
+  vy$value <- abs(vy$value)
+  vz$value <- abs(vz$value)
+  
+  vx <- vx[vx$value < 5000, ]
+  vy <- vy[vy$value < 5000, ]
+  vz <- vz[vz$value < 5000, ]
+  
+  plotdf <- rbind(tmpa[tmpa$boat_id == ids[i], c("created","value","name")],
+                  tmpc[tmpc$boat_id == ids[i], c("created","value","name")],
+                  tmpv[tmpv$boat_id == ids[i], c("created","value","name")])
+
+  size <- 10
+
+  png(filename = paste("outliers/CountVoltage_", ids[i], ".png", sep = ""), width= 2048, height = 2048, units = "px")
+  print(
+    ggplot(plotdf, aes(x = created, y = value, colour = name)) +
+    geom_line() +
+    geom_vline(xintercept = as.numeric(b)) +
+    geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+    labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  )
+  dev.off()  
+
+  plotdf <- data.frame(
+    created = c(unlist(tmpa[tmpa$boat_id == ids[i],"created"]), unlist(tmpa[tmpa$boat_id == ids[i],"created"])),
+    value = c(unlist(tmpa[tmpa$boat_id == ids[i],"value"]), unlist(tmpa[tmpa$boat_id == ids[i],"speed"]) * 100),
+    var = c(unlist(tmpa[tmpa$boat_id == ids[i],"name"]), rep("Speed", nrow(tmpa[tmpa$boat_id == ids[i],])))
+  )
+
+  # size <- 15
+  # 
+  # png(filename = paste("outliers/Speed_", ids[i], ".png", sep = ""), width= 4096, height = 4096, units = "px")
+  # print(
+  #   ggplot(plotdf, aes(x = as.POSIXct(created, origin = "1970-01-01 00:00:00"), y = value, colour = var)) +
+  #   geom_line() +
+  #   geom_vline(xintercept = as.numeric(b)) +
+  #   geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+  #   labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  # )
+  # dev.off()
+  # 
+  # 
+  # plotdf <- data.frame(
+  #   created = c(unlist(tmpa[tmpa$boat_id == ids[i],"created"]), unlist(tmpx[tmpx$boat_id == ids[i],"created"]), unlist(tmpv[tmpv$boat_id == ids[i],"created"])),
+  #   value = c(unlist(tmpa[tmpa$boat_id == ids[i],"value"]), unlist(tmpx[tmpx$boat_id == ids[i],"voltage_delta"]) * 1000, unlist(tmpv[tmpv$boat_id == ids[i],"value"])),
+  #   var = c(unlist(tmpa[tmpa$boat_id == ids[i],"name"]), rep("voltage_delta", nrow(tmpx[tmpx$boat_id == ids[i],])), unlist(tmpv[tmpv$boat_id == ids[i],"name"]))
+  # )
+  # 
+  # size <- 15
+  # 
+  # png(filename = paste("outliers/VoltageDelta_", ids[i], ".png", sep = ""), width= 4096, height = 4096, units = "px")
+  # print(
+  #   ggplot(plotdf, aes(x = as.POSIXct(created, origin = "1970-01-01 00:00:00"), y = value, colour = var)) +
+  #   geom_line() +
+  #   geom_vline(xintercept = as.numeric(b)) +
+  #   geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+  #   labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  # )
+  # dev.off()
+  # 
+  # plotdf <- rbind(vx[, c("created","value","name")],
+  #                 vy[, c("created","value","name")],
+  #                 vz[, c("created","value","name")]
+  #                 )
+  # 
+  # size <- 15
+  # 
+  # png(filename = paste("outliers/Components", ids[i], ".png", sep = ""), width= 4096, height = 4096, units = "px")
+  # print(
+  #   ggplot(plotdf, aes(x = as.POSIXct(created, origin = "1970-01-01 00:00:00"), y = value, colour = name)) +
+  #   geom_line() +
+  #   geom_vline(xintercept = as.numeric(b)) +
+  #   geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+  #   labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  # )
+  # dev.off()
+
+}
+
+# rm(daat, plotdf, tmp, tmpa, tmpc, tmpv, tout, all_outliers, b, i, ids, per, runs, size)
+```
+
+```{r}
+tmp <- tmpx
+# tmp <- tmp[!is.na(tmp$start_time), ]
+# 
+# 
+# mean(tmp$start_time)
+
+
+
+# 
+tmp <- tmp[tmp$boat_id == 1877, ]
+
+
+tmp <- tmp[tmp$created > as.POSIXct("2017-05-15 10:00:00") & tmp$created < as.POSIXct("2017-05-15 11:00:00"), ]
+# 
+# vol <- tmp[tmp$name == "Battery Voltage"]
+# sho <- tmp[tmp$name == "Shock amplitude"]
+# cou <- tmp[tmp$name == "Shock Count"]
+
+```
+
+```{r}
+sample <- data
+
+unique(sample$name)
+
+sample <- sample[sample$name == "GNSS status", ]
+
+```
+
+
+Classify outliers for each device separately
+```{r, inclide=FALSE}
+data <- fread("firstclass_may.csv")
+x <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration")
+y <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 1")
+z <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 2")
+count <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock Count")
+voltage <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage")
+
+colnames(x)[colnames(x) == "value"] <- "x"
+colnames(y)[colnames(y) == "value"] <- "y"
+colnames(z)[colnames(z) == "value"] <- "z"
+
+xyz <- data.frame(
+  created = x$created,
+  boat_id = x$boat_id,
+  speed = x$speed,
+  bearing = x$bearing,
+  wind_speed = x$wind_speed,
+  st_x = x$st_x,
+  st_y = x$st_y,
+  x = x$x,
+  y = y$y,
+  z = z$z,
+  shock = sqrt(x$x^2 + y$y^2 + z$z^2),
+  count = count$value,
+  sailpoint = x$sailpoint,
+  class = rep(as.character(NA), nrow(x)),
+  color = rep(as.character("red"), nrow(x)),
+  categories_num = rep(0, nrow(x)),
+              stringsAsFactors = FALSE
+)
+
+# xyz$shock <- abs(xyz$shock - mean(xyz$shock))
+```
+
+
+```{r}
+tmpx <- xyz
+tmpv <- voltage
+
+
+ids <- c(1873, 1876, 1877, 1878, 1879, 1880, 1881, 1882)
+
+tmpx <- tmpx[is.element(tmpx$boat_id, ids), ]
+tmpv <- tmpv[is.element(tmpv$boat_id, ids), ]
+tmpx$voltage <- tmpv[, "value"]
+tmpx$created <- as.POSIXct(tmpx$created)
+tmpx$start_time <- rep(as.POSIXct("1970-01-01 00:00:00"), nrow(tmpx))
+tmpx$end_time <- rep(as.POSIXct("1970-01-01 00:00:00"), nrow(tmpx))
+
+tmpt <- NULL
+
+for(i in 1:length(ids)) {
+  tmpb <- tmpx[tmpx$boat_id == ids[i], ]
+  tmpb <- tmpb[order(tmpb$created), ]
+  
+  runs <- find_runs(tmpb$speed)
+  
+  if(length(runs) > 0) {
+    tmpr <- NULL
+    tmp <- tmpb[1:(runs[1]-1), ]
+    tmp$end_time <- rep(tmpb[runs[1], "created"], nrow(tmp))
+    tmpr <- rbind(tmpr, tmp)
+    
+    for(j in 1:(length(runs) - 1)) {
+      if(j != length(runs) - 1) {
+        tmp <- tmpb[runs[j]:(runs[(j+1)]-1), ]  
+        tmp$end_time <- rep(tmpb[runs[(j+1)], "created"], nrow(tmp))
+      } else {
+        tmp <- tmpb[runs[j]:runs[(j+1)], ]
+      }
+      tmp$start_time <- rep(tmpb[runs[j], "created"], nrow(tmp))
+      tmpr <- rbind(tmpr, tmp)
+    } 
+  }
+  tmpt <- rbind(tmpt, tmpr)
+}
+tmpt$start_time <- as.POSIXct(ifelse(tmpt$start_time == as.POSIXct("1970-01-01 00:00:00"), NA, tmpt$start_time), origin = "1970-01-01 00:00:00")
+tmpt$end_time <- as.POSIXct(ifelse(tmpt$end_time == as.POSIXct("1970-01-01 00:00:00"), NA, tmpt$end_time), origin = "1970-01-01 00:00:00")
+
+tmpt$start_delta <- round(abs(tmpt$start_time - tmpt$created)/60, digits = 2)
+tmpt$end_delta <- round(abs(tmpt$end_time - tmpt$created)/60, digits = 2)
+
+tmpx <- tmpt
+
+tmpx$count_delta = rep(0, nrow(tmpx))
+tmpx$voltage_delta = rep(0, nrow(tmpx))
+
+for(i in 2:nrow(tmpx)) {
+    tmpx[i, "count_delta"] <- abs(tmpx[i, "count"] - tmpx[i-1, "count"])
+    tmpx[i, "voltage_delta"] <- abs(tmpx[i, "voltage"] - tmpx[i-1, "voltage"])
+}
+
+tmpx <- clean_data(tmpx)
+
+out_each <- NULL
+tmp <- NULL
+sds <- c(rep(0, length(ids)))
+
+for(i in 1:length(ids)) {
+  device <- tmpx[tmpx$boat_id == ids[i],]
+  device <- device[order(device$created),]
+  device$shock <- device$shock - mean(device$shock)
+
+  out_each <- rbind(out_each, device[device$shock > 3 * sd(device$shock),])
+  sds[i] <- 3 * sd(device$shock)
+  tmp <- rbind(tmp, device)
+}
+
+tmpx <- tmp
+
+for(i in 1:nrow(out_each)) {
+  if(out_each[i, "speed"] == 0 & out_each[i, "bearing"] <= 0.1  & out_each[i, "count"] == 0 | as.numeric(substr(out_each[i, "created"], 12, 13)) < 6 & out_each[i, "speed"] == 0 & out_each[i, "count"] == 0 | as.numeric(substr(out_each[i, "created"], 12, 13)) > 22 & out_each[i, "speed"] == 0 & out_each[i, "count"] == 0) {
+    out_each[i, "class"] <- "Device reset"
+    out_each[i, "color"] <- "blue"
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  } 
+  if(out_each[i, "count_delta"] > 3000 | out_each[i, "count"] == 6000) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "Count delta"
+      out_each[i, "color"] <- "orange"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", Count delta", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  } 
+  if(out_each[i, "wind_speed"] > 5) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "Wind speed"
+      out_each[i, "color"] <- "green"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", Wind speed", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  }
+  if(out_each[i, "voltage_delta"] > 0.2) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "Voltage delta"
+      out_each[i, "color"] <- "gold"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", Voltage delta", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  } 
+  if(out_each[i, "speed"] > 9) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "Speed"
+      out_each[i, "color"] <- "pink"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", Speed", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  } 
+  if(!is.na(out_each[i, "start_delta"]) & out_each[i, "start_delta"] < 30) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "After start"
+      out_each[i, "color"] <- "yellow"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", After start", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  }
+  if(!is.na(out_each[i, "end_delta"]) & out_each[i, "end_delta"] < 30) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "Before start"
+      out_each[i, "color"] <- "purple"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", Before start", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  }
+  if(out_each[i, "voltage"] > 14) {
+    if(out_each[i, "categories_num"] == 0) {
+      out_each[i, "class"] <- "High voltage"
+      out_each[i, "color"] <- "gray"
+    } else {
+      out_each[i, "class"] <- paste(out_each[i, "class"], ", High voltage", sep = "")
+    }
+    out_each[i, "categories_num"] <- out_each[i, "categories_num"] + 1
+  }
+}
+
+not_solved <- out_each[out_each$categories_num == 0, ]
+solved <- out_each[out_each$categories_num > 0, ]
+
+num <- nrow(out_each[!is.na(out_each$class),])
+perc <- round(num/nrow(out_each)*100, digits = 2)
+print(paste("Number of solved: ",num, sep = ""))
+print(paste("Percentage of solved: ",perc,"%", sep = ""))
+
+# rm(tmp, tmpb, tmpr, tmpt, tmpv, tmpx, i, j, num, perc, runs)
+```
+
+Outliers visualization
+```{r}
+daat <- data[is.element(data$boat_id, ids), ]
+
+tmpa <- daat[daat$name == "Shock amplitude", ]
+tmpc <- daat[daat$name == "Shock Count", ]
+tmpv <- daat[daat$name == "Battery Voltage",]
+visx <- daat[daat$name == "Acceleration"]
+visy <- daat[daat$name == "Acceleration 1"]
+visz <- daat[daat$name == "Acceleration 2"]
+
+ids <- ids[order(ids)]
+
+tmpa <- tmpa[tmpa$value < 15000, ]
+
+tmpa <- tmpa[order(tmpa$created), ]
+tmpx <- tmpx[order(tmpx$created), ]
+tmpa$value <- tmpx$shock
+
+tmpc$value <- tmpc$value / 10
+tmpv$value <- tmpv$value * 100 - 500
+
+tmpa$created <- as.POSIXct(tmpa$created)
+tmpc$created <- as.POSIXct(tmpc$created)
+tmpv$created <- as.POSIXct(tmpv$created)
+
+all_outliers <- NULL
+
+for(i in 1:length(ids)) {
+
+  tmp <- tmpa[tmpa$boat_id == ids[i], ]
+  tmp <- tmp[order(created),]
+  
+  tout <- out_each[out_each$boat_id == ids[i], ]
+
+  runs <- find_runs(tmp$speed)
+
+  b <- as.POSIXct(unlist(as.list(tmp[runs, "created"])), origin = "1970-01-01 00:00:00")
+  
+  
+  size <- 4
+  per <- round(nrow(tout[tout$color != "red",])/nrow(tout) * 100, digits = 2)
+    
+  tmpa <- tmpa[tmpa$value < 10000, ]
+  tout <- tout[tout$shock < 10000, ]
+
+  plotdf <- rbind(tmp[tmp$boat_id == ids[i], c("created","value","name")],
+                  tmpc[tmpc$boat_id == ids[i], c("created","value","name")],
+                  tmpv[tmpv$boat_id == ids[i], c("created","value","name")])
+
+  size <- 10
+
+  png(filename = paste("outliers/CountVoltage_", ids[i], ".png", sep = ""), width= 2048, height = 2048, units = "px")
+  print(
+    ggplot(plotdf, aes(x = created, y = value, colour = name)) +
+    geom_line() +
+    geom_vline(xintercept = as.numeric(b)) +
+    geom_hline(yintercept = sds[i], color = "purple") + 
+    geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+    labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  )
+  dev.off()  
+
+  # plotdf <- data.frame(
+  #   created = c(unlist(tmp[tmp$boat_id == ids[i],"created"]), unlist(tmpa[tmpa$boat_id == ids[i],"created"])),
+  #   value = c(unlist(tmp[tmp$boat_id == ids[i],"value"]), unlist(tmpa[tmpa$boat_id == ids[i],"speed"]) * 100),
+  #   var = c(unlist(tmp[tmp$boat_id == ids[i],"name"]), rep("Speed", nrow(tmpa[tmpa$boat_id == ids[i],])))
+  # )
+  # 
+  # size <- 15
+  # 
+  # png(filename = paste("outliers/Speed_", ids[i], ".png", sep = ""), width= 4096, height = 4096, units = "px")
+  # print(
+  #   ggplot(plotdf, aes(x = as.POSIXct(created, origin = "1970-01-01 00:00:00"), y = value, colour = var)) +
+  #   geom_line() +
+  #   geom_vline(xintercept = as.numeric(b)) +
+  #   geom_point(data = tout, aes(x = created, y = shock), color = tout$color, size = size) +
+  #   labs(title = paste("Boat id: ",ids[i], ", Percentage of solved: ",per,"%", sep = ""))
+  # )
+  # dev.off()
+
+}
+
+table(out_each$class)
+
+stats_sep <- data.frame(
+  class = c("After start", "Before start", "Count delta", "Device reset", "High voltage", "Speed", "Voltage delta", "Wind speed"), 
+  percentage = numeric(length = 8)
+  )
+
+for(i in 1:nrow(stats_sep)) {
+  perc <- out_each[grep(stats_sep[i, "class"], out_each$class), ]
+  stats_sep[i, "percentage"] <- round(nrow(perc)/nrow(solved) * 100, digits = 2)
+}
+
+for(i in 1:nrow(stats_sep)) {
+  print(paste("Percentage of outliers classified as ", stats_sep[i, "class"]," is: ",stats_sep[i, "percentage"],"%", sep = ""))
+}
+
+print(paste("Percetnage of outliers 30 min before or after departure or arrival is: ", stats_sep[stats_sep$class == "After start", "percentage"] + stats_sep[stats_sep$class == "Before start", "percentage"],"%", sep = ""))
+
+all_stats <- NULL
+for(i in 1:length(ids)) {
+  
+  boat_stats <- data.frame(
+  class = c("After start", "Before start", "Count delta", "Device reset", "High voltage", "Speed", "Voltage delta", "Wind speed"), 
+  percentage = numeric(length = 8)
+  )
+  
+  tmp <- out_each[out_each$boat_id == ids[i], ]
+  solvd <- tmp[tmp$categories_num > 0, ]
+ 
+  for(j in 1:nrow(boat_stats)) {
+    perc <- tmp[grep(boat_stats[j, "class"], tmp$class), ]
+    boat_stats[j, "percentage"] <- round(nrow(perc)/nrow(solvd) * 100, digits = 2)
+  }
+  
+  print("==========================")
+  print(paste("Boat id: ",ids[i], sep =""))
+  for(i in 1:nrow(boat_stats)) {
+    print(paste("Percentage of outliers classified as ", boat_stats[i, "class"]," is: ",boat_stats[i, "percentage"],"%", sep = ""))
+  }
+  
+  print(paste("Percetnage of outliers 30 min before or after departure or arrival is: ", boat_stats[boat_stats$class == "After start", "percentage"] + boat_stats[boat_stats$class == "Before start", "percentage"],"%", sep = ""))
+  
+  all_stats <- rbind(all_stats, boat_stats)
+}
+
+# rm(daat, plotdf, tmp, tmpa, tmpc, tmpv, tout, all_outliers, b, i, ids, per, runs, size)
+```
+
+```{r}
+tmp <- tmpx
+
+tmp <- tmp[tmp$boat_id == 1878, ]
+tmp <- tmp[tmp$created > as.POSIXct("2017-05-14 12:00:00") & tmp$created < as.POSIXct("2017-05-14 13:30:00"), ]
+```
+

@@ -1,0 +1,2948 @@
+---
+title: "Shock sensor analysis ideas"
+author: "Andraz Krasovec"
+date: "18.05.2017"
+output: html_notebook
+---
+Map sensor data with trackpoints
+```{r}
+boat <- boat3
+# 
+# sensor <- "Shock amplitude"
+# devid <- "1242"
+# 
+# 
+# tmpb <- boat
+# unique(tmpb[tmpb$device_id == "764","name"])
+# unique(tmpb[tmpb$device_id == "1242","name"])
+# unique(tmpb$name)
+# 
+# oneDevice <- tmpb[tmpb$name == sensor & tmpb$device_id == devid, c("created","st_x","st_y","value","name","speed")]
+# 
+# oneDevice <- oneDevice[with(oneDevice, order(created)), ]
+# oneDevice <- oneDevice[oneDevice$st_x > 0, ]
+# 
+# oneDevice$value <-oneDevice$value
+# 
+# t <- median(oneDevice$value)
+# # t <- median(oneDevice$speed)
+# 
+# # Get a bounding box
+# sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+# map <- qmap(location = sbbox, zoom = 13, scale = 1, center)
+# 
+# # Write to a file
+# png(filename='sensor_sa.png', width=4096,height=4096,units="px",res=100)
+# # Plot the map and points
+# map +
+# 
+#   geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = value), size = 5, alpha = 1) +
+# 
+#   scale_colour_gradient2(low = "green", high = "red", guide = "colourbar",  midpoint = t)
+# 
+# 
+# # Close file
+# dev.off()
+# plot(oneDevice$value, type = "l")
+# # rm(oneDevice, gridDevice)
+# rm(map, sbbox, sensor, devid)
+# 
+# odsa <- oneDevice
+# tsa <- t
+
+#====
+
+sensor <- "Inclination"
+devid <- "764"
+
+tmpb <- boat
+
+oneDevice <- tmpb[tmpb$name == sensor & tmpb$device_id == devid, c("created","st_x","st_y","value","name","speed")]
+
+oneDevice <- oneDevice[with(oneDevice, order(created)), ]
+oneDevice <- oneDevice[oneDevice$st_x > 0, ]
+
+oneDevice$value <-oneDevice$value
+
+oneDevice <- oneDevice[75:125,]
+
+t <- median(oneDevice$value)
+# t <- median(oneDevice$speed)
+
+# Get a bounding box
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 12, scale = 1, center)
+
+# Write to a file
+# png(filename='sensor_mo.png', width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = value), size = 1, alpha = 1) +
+
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar",  midpoint = t)
+
+
+# Close file
+# dev.off()
+
+# plot(oneDevice$value, type = "l")
+
+odmo <- oneDevice
+tmo <- t
+
+rm(t, sensor, map, devid, sbbox, oneDevice, tmpb)
+rm(tmo,tsa, boat)
+
+```
+
+Correlate data according to time
+```{r}
+# nte <- naiveTimeEstimation(odsa, odmo)
+ate <- averageTimeEstimation(odsa, odmo)
+# nle <- averageTimeEstimationNonL(odsa, odmo)
+
+# plotdf <- melt(nte, id = "time")
+# # png(filename='plot.png', width=4096,height=4096,units="px",res=100)
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# # dev.off()
+
+tmp <- data.frame(time = ate$time, sa = ate$saval, speed = ate$speed * 100 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = ate$time, sa = ate$moval, speed = ate$speed * 50 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = ate$time, sa = ate$saval, mo = ate$moval)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# ccf(nte$saval, nte$moval)
+# ccf(ate$saval, ate$moval)
+# ccf(nle$saval, nle$moval)
+
+# test <- ate
+# 
+# test$moval <- scalef(test$saval, test$moval)
+# 
+# plotdf <- melt(test, id = "time")
+# # png(filename='plot.png', width=4096,height=4096,units="px",res=100)
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# # dev.off()
+# 
+ccf(ate$saval, ate$moval)
+rm(tmp, plotdf)
+```
+
+
+Correlate with weather data with automatic date detection
+```{r}
+merge_wb <- function(boat_data, directory = "") {
+  
+  ########################
+  # Main functions #######
+  ########################
+  
+  ### Format of boat data:
+  # POSIXct -> time of creation
+  # numeric -> longitude
+  # numeric -> latitude
+  # numeric -> speed
+  # numeric -> bearing
+  
+  # DONE
+  boat_data_preparation <- function(boat_data) {
+    # Exclude all rows with any NA values
+    boats.merge <- na.omit(boat_data)
+    # Rename the columns
+    colnames(boats.merge) <- c("boat_id","created","st_x","st_y","speed","bearing","shock")
+    # Trim the date
+    boats.merge$created <- as.character(substr(boats.merge$created,1,19))
+    # and convert it to POSIXct class
+    boats.merge$date <- as.POSIXct(boats.merge$created, tz = "UTC")
+    return(boats.merge)
+  } 
+    
+  # DONE
+  weather_data_preparation <- function(weather_path) {
+    
+    # Take the GRIB path file and convert it to netcdf file
+    a <- grib2netcdf(weather_path, "tmpnc")
+    # Open the netcdf file
+    ncin <- nc_open("tmpnc")
+  
+    # Get all variable names
+    variables <- names(ncin[['var']])
+    
+    # Get Lon and Lat variables
+    lon <- ncvar_get(ncin, "lon")
+    lat <- ncvar_get(ncin, "lat")
+    
+    # Find the wind component names
+    i <- grep("component+", variables)
+    uvar <- variables[i[1]]
+    vvar <- variables[i[2]]
+
+    # Extract the u component of wind from the netcdf file
+    i <- 1
+    uvars <- c(uvar, "u-component_of_wind_height_above_ground","10_metre_U_wind_component_surface")
+    u_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        u_component_of_wind <- ncvar_get(ncin, uvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(u_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(uvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind u-component not found.")
+      }
+    }
+    
+    # Extract the v component of wind from the netcdf file
+    i <- 1
+    vvars <- c(vvar, "v-component_of_wind_height_above_ground","10_metre_V_wind_component_surface")
+    v_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        v_component_of_wind <- ncvar_get(ncin, vvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(v_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(vvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind v-component not found.")
+      }
+    }
+    
+    # Get the time variable name
+    time_var <- strsplit(as.character(ncatt_get(ncin, vvars[i], "coordinates")["value"]), split = " ")
+    time_var <- get_timevar(time_var)
+    # Extract the time variable from the netcdf file
+    time <- ncvar_get(ncin, time_var)
+    
+    # Find the starting time 
+    time_base <- as.POSIXct(unlist(strsplit(ncatt_get(ncin, time_var, "units")$value, split = " "))[3], tz = "UTC")
+
+    # Close and remove the netcdf file
+    nc_close(ncin)
+    file.remove("tmpnc")
+
+    # Prepare the dataframe for processing
+    weather.merge <- melt(u_component_of_wind)
+    # Change the column names 
+    colnames(weather.merge) <- c("lon","lat","time","u_comp")
+    # Insert longitude, latitude and v component into the dataframe
+    weather.merge$lon <- lon[weather.merge$lon]
+    weather.merge$lat <- lat[weather.merge$lat]
+    weather.merge$v_comp <- melt(v_component_of_wind)[ ,"value"]
+
+    # Prepare the time column for processing
+    weather.merge$time <- weather.merge$time - 1
+    # Set the starting time of the data set
+    basetime <- as.POSIXct(time_base, tz = "UTC", format = "%Y-%m-%d %H:%M:%S")
+    # Get the time interval
+    tint <- sort(time)[2] - sort(time[1])
+    # Insert time into the dataframe
+    weather.merge$date <- time_base + weather.merge$time * (3600 * tint)
+          
+    # Round longitude and latitude for easier data comparison later on
+    weather.merge$lon <- round(weather.merge$lon,3)
+    weather.merge$lat <- round(weather.merge$lat,3)
+    
+    # Calculate wind direction based on u and v component of wind
+    weather.merge$wind_direction <- atan2((weather.merge$u_comp * -1), (weather.merge$v_comp * -1)) * (180/pi)
+    weather.merge$wind_direction <- ifelse(weather.merge$wind_direction < 0, weather.merge$wind_direction + 360, weather.merge$wind_direction)
+    
+    # Calculate wind speed based on u and v component of wind
+    weather.merge$wind_speed <- sqrt(weather.merge$u_comp^2 + weather.merge$v_comp^2)
+    return(weather.merge)
+  }
+  
+  # DONE
+  merge_predictions <- function(time_limits, files) {
+    res <- NULL
+    
+    # Get all files from a directory and cut the file extension
+    dates <- substr(dir(paste(getwd(), "/", files, sep = "")),1,10)
+    # Get only the date of start and end of the route
+    start <- as.Date(time_limits[1])
+    stop <- as.Date(time_limits[2])
+
+    # Find correlating weather file with the start of the route
+    for(i in 1:length(dates)) {
+      if(start == dates[i]) {
+        start <- i
+        break
+      } else if(start < dates[i]) {
+        start <- i - 1
+        break
+      }
+    }
+    if(start == 0)
+      start <- 1
+    # Find correlating weather file with the end of the route
+    for(i in start:length(dates)) {
+      if(stop <= dates[i]) {
+        stop <- i
+        break
+      }
+      if(i == length(dates)) {
+        stop <- i
+      }
+    }
+    
+    # Paste the extension back to the results
+    weather_path <- paste(dates[start:stop], ".grb", sep = "")
+    
+    # Merge multiple weather prediction files (works with a single file as well)
+    for(i in 1:length(weather_path)) {
+      tmpw <- weather_data_preparation(paste(files, weather_path[i], sep = ""))
+      tmpw$set <- i
+      
+      res <- res[res$date < min(tmpw$date), ]
+      res <- rbind(res, tmpw)
+      print(paste("Weather file",weather_path[i],"successfully processed."))
+    }
+    return(res)
+  }
+  
+  # DONE
+  merge_data <- function(tmpb, tmpw) {
+    # Round longitude, latitude and date from boat dataset to the interval, provided by the weather dataset
+    tmpb$date <- as.POSIXct(roundToIntervalNoBarModified(as.numeric(tmpb$date), as.numeric(unique(tmpw$date))), origin = "1970-01-01 00:00:00", tz = "UTC")
+    tmpb$lon <- roundToIntervalNoBarModified(tmpb$st_x, sort(unique(tmpw$lon)))
+    tmpb$lat <- roundToIntervalNoBarModified(tmpb$st_y, sort(unique(tmpw$lat)))
+    
+    # Convert both data frames to data tables to reduce running time
+    df1 <- data.table(tmpb, key = c("lon","lat","date"))
+    df2 <- data.table(tmpw, key = c("lon","lat","date"))
+    # Merge the data
+    merged.data <- df2[df1]
+    
+    # Calculate the sailpoint (wind direction, relative to the boats bearing)
+    merged.data$sailpoint <- sailpoint2.2(merged.data)
+    
+    # Sort the data according to time
+    merged.data <- merged.data[order(merged.data$created), ]
+    return(merged.data)
+  }
+  ########################
+  # Auxiliary functions ##
+  ########################
+
+  roundToIntervalNoBarModified <- function(data, interval) {
+    for(i in 1:length(data)) {
+      data[i] = interval[which.min(abs(interval-data[i]))]
+    }
+    return(data)
+  }
+  
+  sailpoint2.2 <- function(df) {
+    # Some implementations fix
+    bea <- as.numeric(df$bearing)
+    wdir <- as.numeric(df$wind_direction)
+    # Set the angle for what to be considered front and back of the boat
+    premec <- 70
+    bok <- 110
+    # Convert bearing from 360 to 180 scale
+    df$bearing[df$bearing > 180] <- df$bearing[df$bearing > 180] - 360
+    # Calculate the angles between wind direction and bearing
+    angle <- bea - wdir
+    # Classify angles in four different classes (front, left side, right side, back)
+    pr <- ifelse(abs(angle) <= premec | abs(angle) >= 360 - premec, "PREMEC", "")
+    lb <- ifelse(angle >= ((360 - premec) * -1) & angle <= ((360 - bok) * -1) | 
+            angle >= premec & angle <= bok, "LEVI_BOK", "")  
+    db <- ifelse(angle >= (bok * -1) & angle <= (premec * -1) |
+            angle >= (360 - bok) & angle <= (360 - premec), "DESNI_BOK", "")
+    kr <- ifelse(abs(angle) >= bok & abs(angle) <= (360 - bok), "KRMA", "")
+    # Join the classes and return the result
+    return(paste(pr, lb, db, kr, sep = ""))
+  }
+  
+  grib2netcdf <- function(grib, out) {
+    # Call executed in CMD(not sure how it works on Linux, probably runs in bash?) netcdfAll-4.6.10.jar has to be placed in the same folder as the project to work
+    (shell( 
+      paste("java -Xmx512m -classpath netcdfAll-4.6.10.jar ucar.nc2.dataset.NetcdfDataset -in ",grib," -out ",out, sep = ""),
+      intern = TRUE
+    ))  
+    # Remove files, other than the one we need to minimize the clutter
+    (file.remove(paste(grib,".gbx9", sep = "")))
+    (file.remove(paste(grib,".ncx3", sep = "")))
+  }
+  
+  get_timevar <- function(time_var) {
+    # Convert list to a vector
+    time_var <- unlist(time_var)
+    # Check for all known time variables, otherwise throw an error
+    if(any(time_var == "time")) {
+      return("time")
+    }
+    else if(any(time_var == "time1")) {
+      return("time1")
+    }
+    else if(any(time_var == "time2")) {
+      return("time2")
+    }
+    else {
+      stop("No time found.")
+    } 
+  }
+  ########################
+  # Execution ############
+  ########################
+  
+  # Prepare boat data frame
+  boat <- boat_data_preparation(boat_data)
+  print("Boat data preparation completed.")
+  # Import weather NCDF file and do some data processing
+  weather <- merge_predictions(time_limits = c(min(boat$date), max(boat$date)),
+                               files = directory)
+  print("Weather data preparation completed.")
+  # Merge the processed datasets according to time, longitude and latitude
+  merged <- merge_data(boat, weather)
+  print("Data merged.")
+  # Return the result 
+  return(merged)
+}
+```
+
+
+```{r}
+tmp <- stat1
+t <- sd(tmp$value)
+tmp <- data.frame(time = tmp$time, stat1 = tmp$value, bearingDiff = findDiff(tmp$bearing, 1))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=t) +     
+       geom_hline(yintercept=-t)
+
+tmp <- run
+t <- sd(tmp$value)
+tmp <- data.frame(time = tmp$time, run = tmp$value, bearingDiff = findDiff(tmp$bearing, 1))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=t) +     
+       geom_hline(yintercept=-t)
+
+tmp <- stat2
+t <- sd(tmp$value)
+tmp <- data.frame(time = tmp$time, stat2 = tmp$value, bearingDiff = findDiff(tmp$bearing, 1))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=t) +     
+       geom_hline(yintercept=-t)
+```
+
+```{r}
+x <- 687
+y <- 343
+z <- -687
+t1 <- 333.46832 * pi/180
+t2 <- 41.818 * pi/180
+
+r1 <- rotate3D(x,y,z,t1,"x",0,0,0)
+r2 <- rotate3D(r1$x,r1$y,r1$z,t2,"y",0,0,0)
+
+rm(x,y,z,t1,t2)
+```
+
+```{r}
+ate <- averageTimeEstimationXYZ(getsa(boat3), getmo(boat3))
+a <- ate
+r1 <- rotate3D(ate$xmo,ate$ymo,ate$zmo,t1,"x",0,0,0)
+r2 <- rotate3D(r1$x,r1$y,r1$z,t2,"y",0,0,0)
+ate$xmo <- r2$x
+ate$ymo <- r2$y
+ate$zmo <- r2$z
+tmp <- ate$xsa
+ate$xsa <- ate$zsa
+ate$zsa <- tmp
+
+sa <- sqrt(ate$xsa^2 + ate$ysa^2 + ate$zsa^2)
+mo <- sqrt(ate$xmo^2 + ate$ymo^2 + ate$zmo^2)
+amo <- sqrt(a$xmo^2 + a$ymo^2 + a$zmo^2)
+
+tmp <- data.frame(time = ate$time, sa = (a$zmo), mo = (ate$zmo))
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+```
+
+
+```{r}
+
+run$diff <- findDiff(run$speed, n = 1)
+run$diff <- smth.gaussian(normalize(run$diff), window = w, alpha = a, tails = TRUE)
+
+tmp <- data.frame(time = run$time, speed = run$speed, diff = run$diff)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+value <- run$x
+
+t <- sd(run$diff) * 2
+num <- 0
+run$valued <- value
+for(i in 2:nrow(run) - 1) {
+  if(abs(run[i,"diff"]) > t) {
+    run[i-1,"valued"] <- median(value)
+    run[i,"valued"] <- median(value)
+    run[i+1,"valued"] <- median(value)
+    num <- num + 3
+  }
+}
+
+print(paste("% of adjusted:",(num/nrow(run)*100), sep = " "))
+sd(run$diff) * 2
+
+tmp <- data.frame(time = run$time, x = run$x, y = run$y, z = run$z)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# rm(t, i, run, stat1, stat2, tmp, tmpb, boat, num, plotdf)
+```
+
+```{r}
+tmpb <- xyzsa
+tmpb$value <- sqrt(tmpb$x^2 + tmpb$y^2 + tmpb$z^2)
+stat1 <- tmpb[1:32,]
+run <- tmpb[33:251,]
+stat2 <- tmpb[252:283,]
+
+sl <- 2
+slow <- run[run$speed < sl, ]
+fast <- run[run$speed >= sl, ]
+
+tmp <- data.frame(time = stat1$time, stat1 = stat1$value, speed = stat1$speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = run$time, run = run$value, speed = run$speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = stat2$time, stat2 = stat2$value, speed = stat2$speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = slow$time, slow = slow$value, speed = slow$speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = fast$time, fast = fast$value, speed = fast$speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+rm(tmp,plotdf)
+
+# gaussdx <- function(sigma) {
+#     x <- -round(3*sigma):round(3*sigma)
+#     g <- - ((x/(sigma^2 * sqrt(2 * pi))) * (exp(1) ^ -(x^2/(2*sigma^2))))
+#     g <- g / sum(abs(g))
+#     return(g)
+# }
+# 
+# kernel <- gaussdx(3)
+# tmpb$speeddx <- c(rep(0,9),convolve(tmpb$speed, kernel, type = 'filter'),rep(0,9))
+```
+
+Data prep
+```{r}
+  name <- "Boat"
+  boat <- boat2
+  tmpmo <- getmo(boat)
+  tmpsa <- getsa(boat)
+  tmpb <- averageTimeEstimationXYZ(tmpsa, tmpmo)
+```
+
+Ugotovi katera os kaze v smeri naprej (Greedy approach -> vzemi "vse" možne kote in primerjaj s pospeškom in poglej kaj najbolj sovpada)
+```{r}
+rotate3D <- function(x, y, z, theta, axis = "x", time, speed, diff) {
+  if(axis == "x") {
+    xr <- x
+    yr <- y * cos(theta) - z * sin(theta)
+    zr <- y * sin(theta) + z * cos(theta)
+  } else if(axis == "y") {
+    xr <- z * sin(theta) + x * cos(theta)
+    yr <- y
+    zr <- z * cos(theta) - x * sin(theta)
+  } else if(axis == "z") {
+    xr <- x * cos(theta) - y * sin(theta)
+    yr <- x * sin(theta) + y * cos(theta)
+    zr <- z
+  } else {
+    print("wrong axis parameter!")
+    exit()
+  }
+  return(data.frame(x = xr, y = yr, z = zr, time = time, speed = speed, diff = diff))
+}
+# 7
+# get_results <- function(boat, name) {
+
+  refine <- function(alpha, beta, gama, sens, range, run) {
+    
+    n <- nrow(run)
+    l <- ((2 * (range/(pi/sens)) + 1)^3) * n
+    
+    test2 <- data.table(x = numeric(length = l), y = numeric(length = l), z = numeric(length = l), time = as.POSIXct(rep(NA, l)), speed = numeric(length = l), diff = numeric(length = l), i = numeric(length = l), j = numeric(length = l), k = numeric(length = l))
+    
+    count2 <- 0
+    print("===========")
+    for(i in seq(alpha - range, alpha + range, pi/sens)) {
+      xr <- rotate3D(run$x, run$y, run$z, i, "x", run$time, run$speed, run$diff)
+      for(j in seq(beta - range, beta + range, pi/sens)) {
+        yr <- rotate3D(xr$x, xr$y, xr$z, j, "y", xr$time, xr$speed, xr$diff)
+        for(k in seq(gama - range, gama + range, pi/sens)) {
+          # test2 <- rbind(test2, cbind(rotate3D(yr$x, yr$y, yr$z, k, "z", yr$time, yr$speed, yr$diff), i, j, k))
+          count2 <- count2 + 1
+          s <- n * count2 - n + 1
+          e <- n * count2
+          
+          value <- data.table(cbind(rotate3D(yr$x, yr$y, yr$z, k, "z", yr$time, yr$speed, yr$diff), i, j, k))
+          test2[s:e, (1:9) := value]
+        }
+      }
+      print(i * 180/pi)
+    }
+    return(test2)
+  }
+  
+  calc_dist <- function(count2, test2) {
+    dist2 <- data.frame(dist = numeric(length = count2), i = numeric(length = count2), j = numeric(length = count2), k = numeric(length = count2))
+    
+    i <- 1
+    for(i in 1:(count2)) {
+      n <- nrow(run)
+      s <- i * n - (n - 1)
+      e <- i * n
+      tmp <- test2[s:e,]
+      
+      idx <- nrow(run) * i
+      dist2[i, "dist"] <- mean(sqrt((tmp$x - run$diff)^2))
+      dist2[i,"i"] <- test2[idx,"i"]
+      dist2[i,"j"] <- test2[idx,"j"]
+      dist2[i,"k"] <- test2[idx,"k"]
+    
+    }
+    return(dist2)
+  }
+  
+  get_angles <- function(x) {
+    i <- which.min(x$dist)
+    alpha <- x[i,"i"]
+    beta <- x[i,"j"]
+    gama <- x[i,"k"]
+    print("===========")
+    print(paste(alpha * 180/pi,beta * 180/pi, gama * 180/pi, x[i,"dist"], sep = ", "))
+    return(c(alpha,beta,gama,x[i,"dist"]))
+  }
+
+  print(paste("===",name,"===============", sep = " "))
+  run <- tmpb[, c("xmo","ymo","zmo","xsa","speed","time")]
+  colnames(run) <- c("x","y","z","diff","speed","time")
+  t <- findRun(tmpb$speed)
+  
+  run <- run[(t[1] + 1):t[2],]
+  run <- head(run, 100)
+  
+  w <- 16
+  a <- 3
+  
+  # run$diff <- findDiff(run$speed, 1)
+  # sd(run$diff)
+  # run$diff <- ifelse(run$diff > 2 * sd(run$diff), median(run$diff), run$diff)
+  
+  run$x <- smth.gaussian(normalize(run$x), window = w, alpha = a, tails = TRUE)
+  run$y <- smth.gaussian(normalize(run$y), window = w, alpha = a, tails = TRUE)
+  run$z <- smth.gaussian(normalize(run$z), window = w, alpha = a, tails = TRUE)
+  run$speed <- smth.gaussian(normalize(run$speed), window = w, alpha = a, tails = TRUE)
+  run$diff <- smth.gaussian(normalize(run$diff), window = w, alpha = a, tails = TRUE)
+
+
+
+  ang <- c(pi,pi,pi,1)
+  
+  sens <- 4
+  range <- pi
+  a <- ang[1]
+  b <- ang[2]
+  g <- ang[3]
+  
+  count <- 0
+  plot_res <- list(length = 7)
+  final <- NULL
+  
+  while(ang[4] > 0.05 & count < 7) {
+    
+    res <- refine(a,b,g, sens, range, run)
+    dist <- calc_dist(nrow(res)/nrow(run), res)
+    prev_dist <- ang[4]
+    ang <- get_angles(dist)
+    curr_dist <- ang[4]
+    
+    if(prev_dist >= curr_dist) {
+      sens <- sens * 2
+      range <- range / 2
+      a <- ang[1]
+      b <- ang[2]
+      g <- ang[3]
+      print("OK")
+    } else {
+      a <- a + pi
+      b <- b + pi
+      g <- g + pi
+      print("SWITCHING")
+    }
+    if(a > 2*pi) {
+      a <- a - 2*pi
+    }
+    if(b > 2*pi) {
+      b <- b - 2*pi
+    }
+    if(g > 2*pi) {
+      g <- g - 2*pi
+    }
+    count <- count + 1
+    
+    n <- nrow(run)
+    i <- which.min(dist$dist)
+    s <- i * n - (n - 1)
+    e <- i * n
+    tmp <- res[s:e,]
+    
+    final <- rbind(final, cbind(tmp, count))
+    
+  }
+
+  
+  # return(c(res,dist))
+# }
+
+#one <- get_results(boat1, "Boat1")
+# two <- get_results(boat2, "Boat2")
+# three <- get_results(boat3, "Boat3")
+# four <- get_results(boat4, "Boat4")
+# five <- get_results(boat5, "Boat5")
+# six <- get_results(boat6, "Boat6")
+# seven <- get_results(boat7, "Boat7")
+# rm(alpha, beta, count, e, gama, i, j, k, mini, n, num, range, s, sens, t, w, a, test, tmpb, xr, yr)
+```
+
+Visualization
+```{r}
+
+n <- nrow(run)
+
+i <- which.min(dist$dist)
+s <- i * n - (n - 1)
+e <- i * n
+
+tmp <- res[s:e,]
+
+tmp <- data.frame(time = tmp$time, x = tmp$x, diff = run$diff)
+tmp <- final[, c("time","x","diff","count")]
+plotdf <- melt(tmp, id = c("time","count"))
+p <- ggplot(data = plotdf,
+    aes(x = time, y = value, colour = variable, frame = count)) +
+    geom_line()
+gganimate(p)
+
+# #Shifting the values to get thee best correlation coefficient
+# te <- shift(tmpb$x, n = 2, fill = 0, type = "lead")
+# 
+# tmp <- data.frame(time = tmpb$time, x = te, diff = run$diff)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#     aes(x = time, y = value, colour = variable)) +
+#     geom_line()
+# 
+# ccf(te, run$diff)
+
+# rm(n, i, s, e, tmp, plotdf)
+```
+
+3D rotation testing
+```{r}
+rotate3Dtest <- function(x, y, z, theta, axis = "x", time) {
+  if(axis == "x") {
+    xr <- x
+    yr <- y * cos(theta) - z * sin(theta)
+    zr <- y * sin(theta) + z * cos(theta)
+  } else if(axis == "y") {
+    xr <- z * sin(theta) + x * cos(theta)
+    yr <- y
+    zr <- z * cos(theta) - x * sin(theta)
+  } else if(axis == "z") {
+    xr <- x * cos(theta) - y * sin(theta)
+    yr <- x * sin(theta) + y * cos(theta)
+    zr <- z
+  } else {
+    print("Wrong axis parameter!")
+    exit()
+  }
+  return(data.frame(x = xr, y = yr, z = zr, time = time))
+}
+
+sample <- expand.grid(c(-1,0.5,1),c(-1,0.5,1),c(-1,0.5,1))
+sample$time <- seq(1,nrow(sample),1)
+sample <- `colnames<-`(sample,c("x","y","z","time"))
+
+result <- NULL
+sens <- 2
+for(i in seq(0,(pi * 2 - pi/sens),pi/sens)) {
+  xr <- rotate3Dtest(sample$x, sample$y, sample$z, i, "x", sample$time)
+  for(j in seq(0,(pi * 2 - pi/sens),pi/sens)) {
+    yr <- rotate3Dtest(xr$x, xr$y, xr$z, j, "y", xr$time)
+      for(k in seq(0,(pi * 2 - pi/sens),pi/sens)) {
+        result <- rbind(result, cbind(rotate3Dtest(sample$x, sample$y, sample$z, k, "z", yr$time), i, j, k, sample$x, sample$y, sample$z))
+    } 
+  }  
+}
+
+i <- 1
+n <- nrow(sample)
+s <- i * n - (n - 1)
+e <- i * n
+temp <- result[s:e,]
+
+tmp <- data.frame(time = temp$time, x = temp$x)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+```
+
+Regression
+```{r}
+# ref <- seq(1000, 1800, 2.66)[1:300]
+
+# s <- ate[,c("time","saval")]
+# m <- ate[,c("time","moval")]
+s <- odsa[, c("created", "value")]
+m <- odmo[, c("created", "value")]
+
+# r <- data.frame(time = s$time, rval = ref)
+models <- rpart(value ~ as.numeric(as.POSIXct(created)), data = m, method = "anova")
+
+s$test <- predict(models)
+# r$test <- predict(models, r)
+
+vis <- data.frame(time = as.POSIXct(s$created), mval = s$value, mreg = s$test)
+
+plotdf <- melt(vis, id = "time")
+# png(filename='plot.png', width=4096,height=4096,units="px",res=100)
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+# dev.off()
+```
+
+Various testing
+```{r}
+level <- function(x, k = 1) {
+  m <- mean(x)
+  x <- ifelse(x > m, x, 0)
+  m <- mean(x[x > 0])
+  for(i in 1:length(x)) {
+    if(x[i] != 0) {
+      d <- (x[i] - m) / k
+      x[i] <- x[i] - d
+    }
+  }
+  return(x)
+}
+
+tim <- tmpate$time
+sar <- tmpate$sarval
+mor <- tmpate$morval
+
+a <- level(mor, 1)
+b <- level(sar, 1)
+
+# Test
+tmp <- data.frame(time = tim, sar = sar, mor = mor)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+```
+
+Use xyz instead of a combined vector
+```{r}
+tmpb <- boat5
+xyzsa <- getsa(tmpb)
+xyzmo <- getmo(tmpb)
+atexyz <- averageTimeEstimationXYZ(xyzsa, xyzmo)
+
+atexyz$saval <- sqrt(atexyz$xsa^2 + atexyz$ysa^2 + atexyz$zsa^2)
+atexyz$moval <- sqrt(atexyz$xmo^2 + atexyz$ymo^2 + atexyz$zmo^2)
+rm(tmpb,xmo,xsa,ymo,ysa,zmo,zsa)
+
+# atexyz$xmo <- atexyz$xmo - (atexyz[1,"xmo"] - atexyz[1,"xsa"])
+# atexyz$ymo <- atexyz$ymo - (atexyz[1,"ymo"] - atexyz[1,"ysa"])
+# atexyz$zmo <- atexyz$zmo - (atexyz[1,"zmo"] - atexyz[1,"zsa"])
+# 
+# Sa all axis
+tmp <- data.frame(time = atexyz$time, xsa = atexyz$xsa, ysa = atexyz$ysa, zsa = atexyz$zsa)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# Mo all axis
+tmp <- data.frame(time = atexyz$time, xmo = atexyz$xmo, ymo = atexyz$ymo, zmo = atexyz$zmo)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# Combined X axis
+tmp <- data.frame(time = atexyz$time, xsa = atexyz$xsa, xmo = atexyz$xmo)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# Combined Y axis
+tmp <- data.frame(time = atexyz$time, ysa = atexyz$ysa, ymo = atexyz$ymo)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# Combined Z axis
+tmp <- data.frame(time = atexyz$time, zsa = atexyz$zsa, zmo = atexyz$zmo)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+# Combined Z axis
+tmp <- data.frame(time = atexyz$time, sa = atexyz$saval, mo = atexyz$moval)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+
+rm(tmp,plotdf)
+```
+
+Single component analysis
+```{r}
+tmpx <- atexyz[,c("time","xsa","xmo")]
+
+
+
+tmp <- data.frame(time = tmpx$time, sa = (tmpx$xsa), mo = (tmpx$xmo))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+ccf(tmpx$xsa, tmpx$xmo)
+
+tmpx$xsa <- normalize(tmpx$xsa)
+tmpx$xmo <- normalize(tmpx$xmo)
+
+tmp <- data.frame(time = tmpx$time, sa = (tmpx$xsa), mo = (tmpx$xmo))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+ccf(tmpx$xsa, tmpx$xmo)
+```
+
+Angle transformation
+```{r}
+tmpate <- atexyz
+
+tmpate$xsa <- normalize(tmpate$xsa)
+tmpate$ysa <- normalize(tmpate$ysa)
+tmpate$zsa <- normalize(tmpate$zsa)
+tmpate$xmo <- normalize(tmpate$xmo)
+tmpate$ymo <- normalize(tmpate$ymo)
+tmpate$zmo <- normalize(tmpate$zmo)
+
+a <- 1
+
+anglesSa <- calculateAngles(tmpate[a,"xsa"], tmpate[a,"ysa"], tmpate[a,"zsa"])
+anglesMo <- calculateAngles(tmpate[a,"xmo"], tmpate[a,"ymo"], tmpate[a,"zmo"])
+
+theta <- anglesMo[1] - anglesSa[1]
+psi <- anglesMo[2] - anglesSa[2]
+fi <- anglesMo[3] - anglesSa[3]
+
+thetas <- anglesSa[1] - anglesMo[1]
+psis <- anglesSa[2] - anglesMo[2]
+fis <- anglesSa[3] - anglesMo[3]
+
+for(i in 1:nrow(tmpate)) {
+  x <- tmpate[i,"xmo"]
+  y <- tmpate[i,"ymo"]
+  z <- tmpate[i,"zmo"]
+  
+  res <- calculateVals(theta, psi, fi, x, y, z)
+  
+  tmpate[i,"xmor"] <- res[1]
+  tmpate[i,"ymor"] <- res[2]
+  tmpate[i,"zmor"] <- res[3]
+  
+  x <- tmpate[i,"xsa"]
+  y <- tmpate[i,"ysa"]
+  z <- tmpate[i,"zsa"]
+  
+  res <- calculateVals(thetas, psis, fis, x, y, z)
+  
+  tmpate[i,"xsar"] <- res[1]
+  tmpate[i,"ysar"] <- res[2]
+  tmpate[i,"zsar"] <- res[3]
+}
+
+tmpate$saval <- sqrt(tmpate$xsa^2 + tmpate$ysa^2 + tmpate$zsa^2)
+tmpate$moval <- sqrt(tmpate$xmo^2 + tmpate$ymo^2 + tmpate$zmo^2)
+tmpate$morval <- sqrt(tmpate$xmor^2 + tmpate$ymor^2 + tmpate$zmor^2)
+tmpate$sarval <- sqrt(tmpate$xsar^2 + tmpate$ysar^2 + tmpate$zsar^2)
+
+ccf(tmpate$saval, tmpate$morval)
+ccf(tmpate$sarval, tmpate$moval)
+ccf(tmpate$sarval, tmpate$morval)
+ccf(tmpate$saval, tmpate$moval)
+
+# Test
+tmp <- data.frame(time = tmpate$time, xsa = tmpate$xsa, xmo = tmpate$xmo, xmor = tmpate$xmor)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, ysa = tmpate$ysa, ymo = tmpate$ymo, ymor = tmpate$ymor)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, zsa = tmpate$zsa, zmo = tmpate$zmo, zmor = tmpate$zmor)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, sa = tmpate$saval, mor = tmpate$morval)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, sar = tmpate$sarval, mo = tmpate$moval)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, sar = tmpate$sarval, mor = tmpate$morval)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# Test
+tmp <- data.frame(time = tmpate$time, sa = tmpate$saval, mo = tmpate$moval)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+# # Test
+# tmp <- data.frame(time = tmpate$time, xsar = tmpate$sarval)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# rm(tmp,plotdf)
+
+# sd(tmpate$sarval) * 3
+# sd(tmpate$morval) * 3
+# mean(tmpate$sarval)
+# mean(tmpate$morval)
+
+rm(a,i,x,y,z,res,anglesMo,anglesSa,fi,fis,psi,psis,theta,thetas)
+```
+
+Angle transformation (brute force)
+```{r}
+rotate3Dcomb <- function(x, y, z, theta, axis = "x") {
+  if(axis == "x") {
+    xr <- x
+    yr <- y * cos(theta) - z * sin(theta)
+    zr <- y * sin(theta) + z * cos(theta)
+  } else if(axis == "y") {
+    xr <- z * sin(theta) + x * cos(theta)
+    yr <- y
+    zr <- z * cos(theta) - x * sin(theta)
+  } else if(axis == "z") {
+    xr <- x * cos(theta) - y * sin(theta)
+    yr <- x * sin(theta) + y * cos(theta)
+    zr <- z
+  } else {
+    print("wrong axis parameter!")
+    exit()
+  }
+  return(data.frame(x = xr, y = yr, z = zr))
+}
+
+closest <- function(ate,x,y,z) {
+  dist <- vector(length = nrow(ate))
+  for(i in 1:length(dist)) {
+    dist[i] <- sqrt((ate[i,"x"] - x)^2 + (ate[i,"y"] - y)^2 + (ate[i,"z"] - z)^2)
+  }
+  return(which.min(dist))
+}
+boat <- boat2
+ate <- averageTimeEstimationXYZ(getsa(boat), getmo(boat))
+
+fit <- closest(data.frame(x = ate$xsa, y = ate$ysa, z = ate$zsa),-1000,0,0)
+
+tmpb <- ate[, c("xmo","ymo","zmo")]
+sens <- 8
+test <- NULL
+count <- 0
+for(i in seq(0,(pi - pi/sens),pi/sens)) {
+  xr <- rotate3Dcomb(tmpb$xmo, tmpb$ymo, tmpb$zmo, i, "x")  
+  for(j in seq(0,(pi - pi/sens),pi/sens)) {
+    yr <- rotate3Dcomb(xr$x, xr$y, xr$z, j, "y")
+    for(k in seq(0,(pi - pi/sens),pi/sens)) {
+      test <- rbind(test, cbind(rotate3Dcomb(yr$x, yr$y, yr$z, k, "z"), i, j, k)) 
+      count <- count + 1
+    }
+  }
+}
+
+vismo <- test[seq(fit,nrow(test),nrow(tmpb)),]
+fitmo <- closest(data.frame(x = vismo$x, y = vismo$y, z = vismo$z),-1000,0,0)
+
+rotation <- c(vismo[fitmo,"i"],vismo[fitmo,"j"],vismo[fitmo,"k"])
+
+xr <- rotate3Dcomb(tmpb$xmo, tmpb$ymo, tmpb$zmo, rotation[1], "x")
+yr <- rotate3Dcomb(xr$x, xr$y, xr$z, rotation[2], "y")
+res <- rotate3Dcomb(yr$x, yr$y, yr$z, rotation[3],"z")
+
+sa <- sqrt(ate$xsa^2 + ate$ysa^2 + ate$zsa^2)
+mo <- sqrt(res$x^2 + res$y^2 + res$z^2)
+
+tmp <- data.frame(time = ate$time, sa = sa, mo = mo)
+plotdf <- melt(tmp, id = "time")
+
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+```
+
+ML approach (learn what transforms into what (vector-wise))
+```{r}
+buildDf <- function(path, n) {
+  res <- NULL
+  for(i in 1:n) {
+    tmpb <- fread(paste(path, i, ".csv", sep = ""))
+    xsa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration X", c("created", "st_x", "st_y", "value", "name")]
+    ysa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration Y", c("created", "st_x", "st_y", "value", "name")]
+    zsa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration Z", c("created", "st_x", "st_y", "value", "name")]
+    
+    xyzsa <- data.frame(time = as.POSIXct(xsa$created), x = xsa$value, y = ysa$value, z = zsa$value)
+    
+    xyzsa <- xyzsa[with(xyzsa, order(time)), ]
+    
+    xmo <- tmpb[tmpb$device_id == "764" & tmpb$name == "Acceleration", c("created", "st_x", "st_y", "value", "name")]
+    ymo <- tmpb[tmpb$device_id == "764" & tmpb$name == "Acceleration 1", c("created", "st_x", "st_y", "value", "name")]
+    zmo <- tmpb[tmpb$device_id == "764" & tmpb$name == "Acceleration 2", c("created", "st_x", "st_y", "value", "name")]
+    
+    xyzmo <- data.frame(time = as.POSIXct(xmo$created), x = xmo$value, y = ymo$value, z = zmo$value)
+    xyzmo <- xyzmo[with(xyzmo, order(time)), ]
+    res <- rbind(res, averageTimeEstimationXYZ(xyzsa, xyzmo))
+  }
+  res$xsa <- normalize(res$xsa)
+  res$ysa <- normalize(res$ysa)
+  res$zsa <- normalize(res$zsa)
+  res$xmo <- normalize(res$xmo)
+  res$ymo <- normalize(res$ymo)
+  res$zmo <- normalize(res$zmo)
+  return(res)
+}
+
+data <- buildDf("aut_0", 7)
+```
+
+Regression tree
+```{r}
+# rnd <- sample(2100, 1500, replace = FALSE)
+
+prediction <- function(train, test) {
+  rtx <- rpart(xmo ~ xsa + ysa + zsa, train)
+  rty <- rpart(ymo ~ xsa + ysa + zsa, train)
+  rtz <- rpart(zmo ~ xsa + ysa + zsa, train)
+  
+  resx <- predict(rtx, test)
+  resy <- predict(rty, test)
+  resz <- predict(rtz, test)
+  
+  test$mo <- sqrt(test$xmo^2 + test$ymo^2 + test$zmo^2)
+  test$regmo <- sqrt(resx^2 + resy^2 + resz^2)
+  return(test)
+}
+
+test <- data[1:300, ]
+for(i in 2:(nrow(data) / 300)) {
+  train <- data[301:(i * 300), ]
+  tmp <- prediction(train, test)
+  print(mae(tmp$mo, tmp$regmo))
+}
+
+
+
+
+
+# tmp <- data.frame(time = atexyz$time, mo = mo, reg = regmo)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# tmp <- data.frame(time = atexyz$time, xmo = test$xmo, resx = resx)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# tmp <- data.frame(time = atexyz$time, ymo = test$ymo, resy = resy)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# tmp <- data.frame(time = atexyz$time, zmo = test$zmo, resz = resz)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# ccf(mo, regmo)
+
+```
+
+Linear regression
+```{r}
+rnd <- sample(2100, 1500, replace = FALSE)
+
+train <- data[1:1800,]
+test <- data[1801:2100,]
+
+rtx <- lm(xmo ~ xsa + ysa + zsa, train)
+rty <- lm(ymo ~ xsa + ysa + zsa, train)
+rtz <- lm(zmo ~ xsa + ysa + zsa, train)
+
+resx <- predict(rtx, test)
+resy <- predict(rty, test)
+resz <- predict(rtz, test)
+
+mo <- sqrt(test$xmo^2 + test$ymo^2 + test$zmo^2)
+regmo <- sqrt(resx^2 + resy^2 + resz^2)
+
+
+tmp <- data.frame(time = atexyz$time, mo = mo, reg = regmo)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = atexyz$time, xmo = test$xmo, resx = resx)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = atexyz$time, ymo = test$ymo, resy = resy)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+tmp <- data.frame(time = atexyz$time, zmo = test$zmo, resz = resz)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+ccf(mo, regmo)
+
+rm(mo,regmo,resx,resy,resz,rnd,rtx,rty,rtz)
+```
+
+Random forest
+```{r}
+rnd <- sample(2100, 1500, replace = FALSE)
+
+train <- data[1:1800,]
+test <- data[1801:2100,]
+
+rtx <- randomForest(xmo ~ xsa + ysa + zsa, train)
+rty <- randomForest(ymo ~ xsa + ysa + zsa, train)
+rtz <- randomForest(zmo ~ xsa + ysa + zsa, train)
+
+resx <- predict(rtx, test)
+resy <- predict(rty, test)
+resz <- predict(rtz, test)
+
+mo <- sqrt(test$xmo^2 + test$ymo^2 + test$zmo^2)
+sa <- sqrt(test$xsa^2 + test$ysa^2 + test$zsa^2)
+regmo <- sqrt(resx^2 + resy^2 + resz^2)
+
+
+tmp <- data.frame(time = atexyz$time, mo = sa, reg = regmo)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+
+mae(mo,regmo)
+mae(sa,regmo)
+# tmp <- data.frame(time = atexyz$time, xmo = test$xmo, resx = resx)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# tmp <- data.frame(time = atexyz$time, ymo = test$ymo, resy = resy)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# 
+# tmp <- data.frame(time = atexyz$time, zmo = test$zmo, resz = resz)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+
+ccf(mo, regmo)
+
+rm(mo,regmo,resx,resy,resz,rnd,rtx,rty,rtz)
+```
+
+Sensor calibration
+```{r}
+calibrate <- function(p1, p2, p3, p4, p5, p6) {
+  
+}
+
+tmp <- atexyz2[4, c("xsa","ysa","zsa","xmo","ymo","zmo")]
+
+# x1 <- tmp[1,"zsa"]
+# y1 <- tmp[1,"ysa"]
+# z1 <- tmp[1,"xsa"]
+
+# x <- tmp[1,"xmo"]/1000
+# y <- tmp[1,"ymo"]/1000
+# z <- tmp[1,"zmo"]/1000
+
+x1 <- 0
+y1 <- 0
+z1 <- 1000
+
+x2 <- 0
+y2 <- 0
+z2 <- - 1000
+
+x3 <- 0
+y3 <- 1000
+z3 <- 0
+
+x4 <- 0
+y4 <- - 1000
+z4 <- 0
+
+x5 <- 1000
+y5 <- 0
+z5 <- 0
+
+x6 <- - 1000
+y6 <- 0
+z6 <- 0
+
+a1 <- calculateAngles(x1,y1,z1, "deg")
+a2 <- calculateAngles(x2,y2,z2, "deg")
+a3 <- calculateAngles(x3,y3,z3, "deg")
+a4 <- calculateAngles(x4,y4,z4, "deg")
+a5 <- calculateAngles(x5,y5,z5, "deg")
+a6 <- calculateAngles(x6,y6,z6, "deg")
+
+test <- calculateVals(a3[1],a3[2],a3[3],x3,y3,z3,"deg")
+```
+
+Filtering
+```{r}
+squish <- function(ts, lim) {
+  maxv <- max(abs(ts))
+  for(i in 1:length(ts)) {
+    ts[i] <- (ts[i] * lim)/maxv
+  }
+  return(ts)
+}
+# tmp <- ate
+# 
+# tmp$moval <- tmp$moval - mean(tmp$moval)
+# tmp$saval <- tmp$saval - mean(tmp$saval)
+# 
+# tmp$moval <- squish(tmp$moval, 2000)
+# tmp$saval <- squish(tmp$saval, 2000)
+# 
+# plotdf <- melt(tmp, id = "time")
+# # png(filename='plot.png', width=4096,height=4096,units="px",res=100)
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line()
+# # dev.off()
+
+tmp <- ate
+
+ssa <- sd(tmp$saval)
+smo <- sd(tmp$moval)
+ 
+k1 <- 6
+k2 <- 22
+tmp$saval <- ifelse(tmp$saval > k1 * ssa, tmp$saval, mean(tmp$saval))
+tmp$moval <- ifelse(tmp$moval > k2 * smo, tmp$moval, mean(tmp$moval))
+
+tmp$moval <- tmp$moval - mean(tmp$moval)
+tmp$saval <- tmp$saval - mean(tmp$saval)
+
+tmp$moval <- squish(tmp$moval, 2000)
+tmp$saval <- squish(tmp$saval, 2000)
+
+plotdf <- melt(tmp, id = "time")
+# png(filename='plot.png', width=4096,height=4096,units="px",res=100)
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+# dev.off()
+
+ccf(tmp$saval, tmp$moval)
+```
+
+
+
+Functions
+```{r, include=FALSE}
+# Classifying boat movement
+findDiff <- function(x, n = 3) {
+  res <- rep(0, length(x))
+  for(i in (n+1):length(x)) {
+    res[i] <- (x[i] - mean(x[(i-n):(i-1)]))
+  }
+  return(res)
+}
+
+findRun <- function(x) {
+  res <- vector(mode = "numeric", length = 2)
+  i <- 3
+  while(x[i] == 0)
+    i <- i + 1
+  res[1] <- i - 1
+  i <- length(x)
+  while(x[i] == 0)
+    i <- i - 1
+  res[2] <- i
+  return(res)
+}
+
+moved <- function(lon, lat) {
+  res <- vector(mode = "numeric", length = 2)
+  lon <- round(lon,3)
+  lat <- round(lat,3)
+  slon <- lon[1]
+  slat <- lat[1]
+  i <- 2
+  while(lon[i] == slon & lat[i] == slat)
+    i <- i + 1
+  res[1] <- i - 1
+  elon <- lon[length(lon)]
+  elat <- lat[length(lat)]
+  i <- length(lon) - 1
+  while(lon[i] == elon & lat[i] == elat)
+    i <- i - 1
+  res[2] <- i
+  return(res)
+}
+
+cut_time <- function(x, min = 60, pos) {
+  min <- min * 60
+  x$created <- as.POSIXct(x$created)
+  if(pos == "start") {
+    tim <- x[1, "created"]
+    i <- 2
+    if(i > nrow(x))
+      return(NULL)
+    while(as.numeric(x[i,"created"]) - as.numeric(tim) < min) {
+      i <- i + 1
+      if(i > nrow(x))
+        return(NULL)
+    }
+    return(x[i:nrow(x), ])
+  } else if(pos == "end") {
+    tim <- x[nrow(x), "created"]
+    i <- nrow(x) - 1
+    if(i <= 0)
+      return(NULL)
+    while(as.numeric(tim) - as.numeric(x[i,"created"]) < min) {
+      i <- i - 1
+      if(i <= 0)
+        return(NULL)
+    }
+    return(x[1:i,])
+  } else {
+    print("Wrong pos parameter!")
+    stop()
+  }
+}
+
+# Interpolation
+get_nonl_amount <- function(amount, n) {
+  c1 <- amount
+  c2 <- 1 - amount
+  for(i in 1:n) {
+    a1 <- c1^2
+    a2 <- c2^2
+    b1 <- 1 - (a1 + a2)
+    c1 <- a1 + c1 * b1
+    c2 <- a2 + c2 * b1  
+  }
+  return(c1)
+}
+
+shortest_angle3d180nonl <- function(start, end, amount, direction, p) {
+  if(start > 180)
+    start <- 360 - start
+  if(end > 180)
+    end <- 360 - end
+  closer <- ifelse(abs(start) > abs(end), end, start)
+  if(closer == end) {
+    a <- end - closer
+    b <- start - closer
+    amount <- 1 - amount
+  } else {
+    a <- start - closer
+    b <- end - closer
+  }
+  amount <- get_nonl_amount(amount, 4)
+  res <- (a + b * amount) + closer
+  if(res < 0)
+    res <- 360 + res
+  return(res)
+}
+
+interpolate3dtest180nonl <- function(x1, x2, y1, y2, z1, z2, v000, v001, v010, v011, v100, v101, v110, v111, x, y, z) {
+  xd <- (x-x1)/(x2-x1)
+  yd <- (y-y1)/(y2-y1)
+  zd <- (z-z1)/(z2-z1)
+  c00 <- shortest_angle3d180nonl(v000, v100, xd, direction, 1)
+  c01 <- shortest_angle3d180nonl(v001, v101, xd, direction, 1)
+  c10 <- shortest_angle3d180nonl(v010, v110, xd, direction, 1)
+  c11 <- shortest_angle3d180nonl(v011, v111, xd, direction, 1)
+  c0 <- shortest_angle3d180nonl(c00, c01, yd, direction, 1)
+  c1 <- shortest_angle3d180nonl(c10, c11, yd, direction, 1)
+  c <- shortest_angle3d180nonl(c0, c1, zd, direction, 1)
+  return(c)
+}
+
+# Data preparation functions
+getsa <- function(tmpb) {
+  xsa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration X", c("created", "st_x", "st_y", "value", "name", "speed", "bearing")]
+  ysa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration Y", c("created", "st_x", "st_y", "value", "name", "speed")]
+  zsa <- tmpb[tmpb$device_id == "1242" & tmpb$name == "Acceleration Z", c("created", "st_x", "st_y", "value", "name", "speed")]
+  
+  xyzsa <- data.frame(created = as.POSIXct(xsa$created), x = xsa$value, y = ysa$value, z = zsa$value, value = sqrt(xsa$value^2 + ysa$value^2 + zsa$value^2), lon = xsa$st_x, lat = xsa$st_y, speed = xsa$speed , bearing = xsa$bearing)
+  
+  xyzsa <- xyzsa[with(xyzsa, order(created, decreasing = FALSE)), ]
+  
+  return(xyzsa)
+}
+
+# aut_58 -> 764
+getmo <- function(tmpb, boat_id) {
+  xmo <- tmpb[tmpb$name == "Acceleration", c("created", "st_x", "st_y", "value", "name", "speed", "bearing")]
+  ymo <- tmpb[tmpb$name == "Acceleration 1", c("created", "st_x", "st_y", "value", "name", "speed")]
+  zmo <- tmpb[tmpb$name == "Acceleration 2", c("created", "st_x", "st_y", "value", "name", "speed")]
+  
+  xyzmo <- data.frame(created = as.POSIXct(xmo$created), x = xmo$value, y = ymo$value, z = zmo$value, value = sqrt(xmo$value^2 + ymo$value^2 + zmo$value^2), lon = xmo$st_x, lat = xmo$st_y, speed = xmo$speed, bearing = xmo$bearing)
+
+  xyzmo <- xyzmo[with(xyzmo, order(created, decreasing = FALSE)), ]
+  
+  return(xyzmo)
+}
+
+# aut_58 -> 764
+getsamc <- function(tmpb, boat_id) {
+  xmo <- tmpb[tmpb$name == "Acceleration", c("created", "st_x", "st_y", "value", "name", "speed", "bearing")]
+  ymo <- tmpb[tmpb$name == "Acceleration 1", c("created", "st_x", "st_y", "value", "name", "speed")]
+  zmo <- tmpb[tmpb$name == "Acceleration 2", c("created", "st_x", "st_y", "value", "name", "speed")]
+  
+  xyzmo <- data.frame(created = as.POSIXct(xmo$created), x = xmo$value, y = ymo$value, z = zmo$value, value = sqrt(xmo$value^2 + ymo$value^2 + zmo$value^2), lon = xmo$st_x, lat = xmo$st_y, speed = xmo$speed, bearing = xmo$bearing)
+
+  xyzmo <- xyzmo[with(xyzmo, order(created, decreasing = FALSE)), ]
+  
+  return(xyzmo)
+}
+
+# Angle transformation function
+calculateAngles <- function(x, y, z, units = "rad") {
+  x <- x/1000
+  y <- y/1000
+  z <- z/1000
+  theta <- atan(x/sqrt(y^2 + z^2))
+  psi <- atan(y/sqrt(x^2 + z^2))
+  fi <- atan(sqrt(x^2 + y^2)/z)
+  if(units == "rad") {
+    return(c(theta,psi,fi))  
+  } else if(units == "deg") {
+    return(c((theta * 180/pi),(psi * 180/pi), (fi * 180/pi)))
+  } else {
+    print("Unknown units")
+    stop()
+  }
+}
+
+calculateVals <- function(theta, psi, fi, x, y, z, units = "rad") {
+  if(units == "deg") {
+    theta <- theta * pi/180
+    psi <- psi * pi/180
+    fi <- fi * pi/180
+  }
+  resx <- tan(theta) * sqrt(y^2 + z^2)
+  resy <- tan(psi) * sqrt(x^2 + z^2)
+  resz <- tan(fi)^-1 * sqrt(x^2 + y^2)
+  return(c(resx, resy, resz))
+}
+
+# ML functions
+mae <- function(observed, predicted)
+{
+	mean(abs(observed - predicted))
+}
+
+rmae <- function(observed, predicted, mean.val) 
+{  
+	sum(abs(observed - predicted)) / sum(abs(observed - mean.val))
+}
+
+mse <- function(observed, predicted)
+{
+	mean((observed - predicted)^2)
+}
+
+rmse <- function(observed, predicted, mean.val) 
+{  
+	sum((observed - predicted)^2)/sum((observed - mean.val)^2)
+}
+
+# Time correlating functions
+naiveTimeEstimation <- function(odsa, odmo) {
+    combVal <- rbind(data.frame(time = odsa$created, val = odsa$value, name = odsa$name), data.frame(time = odmo$created, val = odmo$value, name = odmo$name))
+
+  sa <- odsa
+  mo <- odmo
+
+  start <- as.POSIXct(min(sa$created, mo$created))
+  end <- as.POSIXct(max(sa$created, mo$created))
+
+  mintim <- as.numeric(start)
+  maxtim <- as.numeric(end)
+
+  timint <- as.numeric(maxtim) - as.numeric(mintim)
+
+  combVal <- data.frame(time = rep(NA, 300), saval = numeric(300), moval = numeric(300))
+
+  timstep <- timint/nrow(combVal)
+
+  for(i in 1:nrow(combVal)) {
+    if(i == 1) {
+      combVal[i,"time"] <- start
+    } else {
+      combVal[i,"time"] <- combVal[i-1,"time"] + timstep
+    }
+  }
+  combVal$time <- as.POSIXct(combVal$time, origin = "1970-01-01 00:00:00")
+
+  satim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(sa$created))
+  motim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(mo$created))
+
+  for(i in 1:nrow(combVal)) {
+    combVal[i,"saval"] <- sa[sa$created == satim[i], "value"]
+    combVal[i,"moval"] <- mo[mo$created == motim[i], "value"]
+  }
+  return(combVal)
+}
+
+averageTimeEstimation <- function(odsa, odmo) {
+    combVal <- rbind(data.frame(time = odsa$created, val = odsa$value, name = odsa$name), data.frame(time = odmo$created, val = odmo$value, name = odmo$name))
+  
+  sa <- odsa
+  mo <- odmo
+  
+  sa$created <- as.POSIXct(sa$created)
+  mo$created <- as.POSIXct(mo$created)
+  
+  start <- as.POSIXct(min(sa$created, mo$created))
+  end <- as.POSIXct(max(sa$created, mo$created))
+  
+  mintim <- as.numeric(start)
+  maxtim <- as.numeric(end)
+  
+  timint <- as.numeric(maxtim) - as.numeric(mintim)
+  
+  combVal <- data.frame(time = rep(NA, 300), saval = numeric(300), moval = numeric(300))
+  
+  timstep <- timint/nrow(combVal)
+  
+  for(i in 1:nrow(combVal)) {
+    if(i == 1) {
+      combVal[i,"time"] <- start
+    } else {
+      combVal[i,"time"] <- combVal[i-1,"time"] + timstep
+    }
+  }
+  combVal$time <- as.POSIXct(combVal$time, origin = "1970-01-01 00:00:00")
+  
+  satim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(sa$created))
+  motim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(mo$created))
+
+  for(i in 1:nrow(combVal)) {
+    
+    tim <- satim[i]
+
+    j <- 1
+    # typeof(sa[[j,"created"]])
+    while(sa[[j,"created"]] < tim) {
+      j <- j + 1
+      if(j == nrow(sa))
+        break
+    }
+    if(j == 1 | j == nrow(sa)) {
+      combVal[i,"saval"] <- sa[[j, "value"]]
+      combVal[i,"speed"] <- sa[[j, "speed"]]
+    } else {
+      combVal[i,"saval"] <- interpolate(as.numeric(sa[[j-1,"created"]]), as.numeric(sa[[j,"created"]]), as.numeric(tim), sa[[j-1,"value"]], sa[[j,"value"]])
+      combVal[i,"speed"] <- interpolate(as.numeric(sa[[j-1,"created"]]), as.numeric(sa[[j,"created"]]), as.numeric(tim), sa[[j-1,"speed"]], sa[[j,"speed"]])
+    }
+    
+    j <- 1
+    while(mo[[j,"created"]] < tim) {
+      j <- j + 1
+      if(j == nrow(mo))
+        break
+    }
+    if(j == 1 | j == nrow(mo)) {
+      combVal[i,"moval"] <- mo[[j, "value"]]
+      combVal[i,"speed"] <- mo[[j, "speed"]]
+    } else {
+      combVal[i,"moval"] <- interpolate(as.numeric(mo[[j-1,"created"]]), as.numeric(mo[[j,"created"]]), as.numeric(tim), mo[[j-1,"value"]], mo[[j,"value"]])
+      combVal[i,"speed"] <- interpolate(as.numeric(mo[[j-1,"created"]]), as.numeric(mo[[j,"created"]]), as.numeric(tim), mo[[j-1,"speed"]], mo[[j,"speed"]])
+    }
+  }
+  return(combVal)
+}
+
+averageTimeEstimationNonL <- function(odsa, odmo) {
+    combVal <- rbind(data.frame(time = odsa$created, val = odsa$value, name = odsa$name), data.frame(time = odmo$created, val = odmo$value, name = odmo$name))
+
+  sa <- odsa
+  mo <- odmo
+
+  sa$created <- as.POSIXct(sa$created)
+  mo$created <- as.POSIXct(mo$created)
+
+  start <- as.POSIXct(min(sa$created, mo$created))
+  end <- as.POSIXct(max(sa$created, mo$created))
+
+  mintim <- as.numeric(start)
+  maxtim <- as.numeric(end)
+
+  timint <- as.numeric(maxtim) - as.numeric(mintim)
+
+  combVal <- data.frame(time = rep(NA, 300), saval = numeric(300), moval = numeric(300))
+
+  timstep <- timint/nrow(combVal)
+
+  for(i in 1:nrow(combVal)) {
+    if(i == 1) {
+      combVal[i,"time"] <- start
+    } else {
+      combVal[i,"time"] <- combVal[i-1,"time"] + timstep
+    }
+  }
+  combVal$time <- as.POSIXct(combVal$time, origin = "1970-01-01 00:00:00")
+
+  satim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(sa$created))
+  motim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(mo$created))
+  n <- 2
+
+  for(i in 1:nrow(combVal)) {
+
+    tim <- satim[i]
+
+    j <- 1
+    # typeof(sa[[j,"created"]])
+    while(sa[[j,"created"]] < tim) {
+      j <- j + 1
+      if(j == nrow(sa))
+        break
+    }
+    if(j == 1 | j == nrow(sa)) {
+      combVal[i,"saval"] <- sa[[j, "value"]]
+    } else {
+      combVal[i,"saval"] <- interpolate_nonl(as.numeric(sa[[j-1,"created"]]), as.numeric(sa[[j,"created"]]), as.numeric(tim), sa[[j-1,"value"]], sa[[j,"value"]], n)
+    }
+
+    j <- 1
+    while(mo[[j,"created"]] < tim) {
+      j <- j + 1
+      if(j == nrow(mo))
+        break
+    }
+    if(j == 1 | j == nrow(mo)) {
+      combVal[i,"moval"] <- mo[[j, "value"]]
+    } else {
+      combVal[i,"moval"] <- interpolate_nonl(as.numeric(mo[[j-1,"created"]]), as.numeric(mo[[j,"created"]]), as.numeric(tim), mo[[j-1,"value"]], mo[[j,"value"]], n)
+    }
+  }
+  return(combVal)
+}
+
+averageTimeEstimationXYZ <- function(sa, mo) {
+
+  start <- as.POSIXct(min(sa$time, mo$time), origin = "1970-01-01 00:00:00")
+  end <- as.POSIXct(max(sa$time, mo$time), origin = "1970-01-01 00:00:00")
+  
+  mintim <- as.numeric(start)
+  maxtim <- as.numeric(end)
+  
+  timint <- as.numeric(maxtim) - as.numeric(mintim)
+  
+  combVal <- data.frame(time = rep(NA, 300), xsa = numeric(300), ysa = numeric(300), zsa = numeric(300), xmo = numeric(300), ymo = numeric(300), zmo = numeric(300))
+  
+  timstep <- timint/nrow(combVal)
+  
+  for(i in 1:nrow(combVal)) {
+    if(i == 1) {
+      combVal[i,"time"] <- start
+    } else {
+      combVal[i,"time"] <- combVal[i-1,"time"] + timstep
+    }
+  }
+  combVal$time <- as.POSIXct(combVal$time, origin = "1970-01-01 00:00:00")
+  
+  satim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(sa$time))
+  motim <- roundToIntervalNoBarModified(combVal$time, as.POSIXct(mo$time))
+
+  for(i in 1:nrow(combVal)) {
+    
+    tim <- satim[i]
+
+    j <- 1
+    while(sa[[j,"time"]] < tim) {
+      j <- j + 1
+      if(j == nrow(sa))
+        break
+    }
+    if(j == 1 | j == nrow(sa)) {
+      combVal[i,"xsa"] <- sa[[j, "x"]]
+      combVal[i,"ysa"] <- sa[[j, "y"]]
+      combVal[i,"zsa"] <- sa[[j, "z"]]
+      combVal[i,"speed"] <- sa[[j, "speed"]]
+    } else {
+      combVal[i,"xsa"] <- interpolate(as.numeric(sa[[j-1,"time"]]), as.numeric(sa[[j,"time"]]), as.numeric(tim), sa[[j-1,"x"]], sa[[j,"x"]])
+      combVal[i,"ysa"] <- interpolate(as.numeric(sa[[j-1,"time"]]), as.numeric(sa[[j,"time"]]), as.numeric(tim), sa[[j-1,"y"]], sa[[j,"y"]])
+      combVal[i,"zsa"] <- interpolate(as.numeric(sa[[j-1,"time"]]), as.numeric(sa[[j,"time"]]), as.numeric(tim), sa[[j-1,"z"]], sa[[j,"z"]])
+      combVal[i,"speed"] <- interpolate(as.numeric(sa[[j-1,"time"]]), as.numeric(sa[[j,"time"]]), as.numeric(tim), sa[[j-1,"speed"]], sa[[j,"speed"]])
+    }
+    
+    j <- 1
+    while(mo[[j,"time"]] < tim) {
+      j <- j + 1
+      if(j == nrow(mo))
+        break
+    }
+    if(j == 1 | j == nrow(mo)) {
+      combVal[i,"xmo"] <- mo[[j, "x"]]
+      combVal[i,"ymo"] <- mo[[j, "y"]]
+      combVal[i,"zmo"] <- mo[[j, "z"]]
+      combVal[i,"speed"] <- mo[[j, "speed"]]
+    } else {
+      combVal[i,"xmo"] <- interpolate(as.numeric(mo[[j-1,"time"]]), as.numeric(mo[[j,"time"]]), as.numeric(tim), mo[[j-1,"x"]], mo[[j,"x"]])
+      combVal[i,"ymo"] <- interpolate(as.numeric(mo[[j-1,"time"]]), as.numeric(mo[[j,"time"]]), as.numeric(tim), mo[[j-1,"y"]], mo[[j,"y"]])
+      combVal[i,"zmo"] <- interpolate(as.numeric(mo[[j-1,"time"]]), as.numeric(mo[[j,"time"]]), as.numeric(tim), mo[[j-1,"z"]], mo[[j,"z"]])
+      combVal[i,"speed"] <- interpolate(as.numeric(mo[[j-1,"time"]]), as.numeric(mo[[j,"time"]]), as.numeric(tim), mo[[j-1,"speed"]], mo[[j,"speed"]])
+    }
+  }
+  return(combVal)
+}
+
+# Others
+interpolate <- function(x1, x2, x, v0, v1) {
+  xd <- (x-x1)/(x2-x1)
+  res <- v0 * (1 - xd) + v1 * xd
+  return(res)
+}
+
+interpolate_nonl <- function(x1, x2, x, v0, v1, n) {
+  # Get the percent of the path from x1 to x2 and the other way around
+  xd <- (x-x1)/(x2-x1)
+  c1 <- xd
+  c2 <- 1 - xd
+  # Square the amounts and calculate new ones n times
+  for(i in 1:n) {
+    a1 <- c1^2
+    a2 <- c2^2
+    b1 <- 1 - (a1 + a2)
+    c1 <- a1 + c1 * b1
+    c2 <- a2 + c2 * b1  
+  }
+  # Interpolate the given values and return the result
+  res <- v0 * c2 + v1 * c1
+  return(res)
+}
+
+roundToIntervalNoBarModified <- function(data, interval) {
+  for(i in 1:length(data)) {
+    data[i] = interval[which.min(abs(interval-data[i]))]
+  }
+  return(data)
+}
+
+scalef <- function(x, y) {
+  int <- max(x) - min(x)
+  ymax <- max(y)
+  
+  for(i in 1:length(y)) {
+    y[i] <- y[i] * int / ymax
+  }
+  
+  off <- abs(x[1] - y[1])
+  print(off)
+  
+  for(i in 1:length(y)) {
+    y[i] <- y[i] - off
+  }
+  
+  return(y)
+}
+
+normalize <- function(x) {
+  x = (x - mean(x)) / sd(x)
+}
+
+filt <- function(x, filter = c(0.25,0.5,0.25)) {
+  off <- as.numeric(substr(length(filter)/2,1,1))
+  res <- x
+  if(sum(filter) != 1) {
+    filter <- filter/sum(filter)
+  }
+  for(i in (off + 1):(length(x) - off)) {
+    tmp <- 0
+    for(j in -off:off) {
+      tmp <- tmp + x[i + j] * filter[j + off + 1]
+    }
+    res[i] <- tmp
+  }
+  return(res)
+}
+```
+
+
+Correlate with weather data (ARSO CSV file Boja Piran)
+```{r}
+merge_wb <- function(boat_data, weather_path) { # TODO...
+  ########################
+  # Main functions #######
+  ########################
+  
+  ### Format of boat data:
+  # POSIXct -> time of creation
+  # numeric -> longitude
+  # numeric -> latitude
+  # numeric -> speed
+  # numeric -> bearing
+  
+  # DONE
+  boat_data_preparation <- function(boat_data) {
+    boats.merge <- na.omit(boat_data)
+    colnames(boats.merge) <- c("created","st_x","st_y","speed","bearing","value")
+    boats.merge$created <- as.character(substr(boats.merge$created,1,19))
+    boats.merge$date <- as.POSIXct(boats.merge$created, tz = "UTC")
+    return(boats.merge)
+  } 
+    
+  # DONE
+  weather_data_preparation <- function(path) {
+    weather.merge <- fread(path)[,c(3:5)]
+    colnames(weather.merge) <- c("date","wind_speed","wind_direction")
+    weather.merge$date <- as.POSIXct(weather.merge$date, tz = "UTC")
+    return(weather.merge)
+  }
+  
+  # DONE
+  merge_data <- function(tmpb, tmpw) {
+    tmpb$date <- as.POSIXct(roundToIntervalNoBarModified(as.numeric(tmpb$date), as.numeric(unique(tmpw$date))), origin = "1970-01-01")
+    tmpw <- tmpw[tmpw$date >= min(tmpb$date) & tmpw$date <= max(tmpb$date), ]
+
+    df1 <- data.table(tmpb, key = c("date"))
+    df2 <- data.table(tmpw, key = c("date"))
+    merged.data <- df2[df1]
+    
+    merged.data$sailpoint <- sailpoint2.2(merged.data)
+    return(merged.data)
+  }
+
+  ########################
+  # Auxiliary functions ##
+  ########################
+
+  roundToIntervalNoBarModified <- function(data, interval) {
+    for(i in 1:length(data)) {
+      data[i] = interval[which.min(abs(interval-data[i]))]
+    }
+    return(data)
+  }
+  
+  sailpoint2.2 <- function(df) {
+    bea <- as.numeric(df$bearing)
+    wdir <- as.numeric(df$wind_direction)
+    premec <- 70
+    bok <- 110
+    df$bearing[df$bearing > 180] <- df$bearing[df$bearing > 180] - 360
+    angle <- bea - wdir
+    pr <- ifelse(abs(angle) <= premec | abs(angle) >= 360 - premec, "PREMEC", "")
+    lb <- ifelse(angle >= ((360 - premec) * -1) & angle <= ((360 - bok) * -1) | 
+            angle >= premec & angle <= bok, "LEVI_BOK", "")  
+    db <- ifelse(angle >= (bok * -1) & angle <= (premec * -1) |
+            angle >= (360 - bok) & angle <= (360 - premec), "DESNI_BOK", "")
+    kr <- ifelse(abs(angle) >= bok & abs(angle) <= (360 - bok), "KRMA", "")
+    return(paste(pr, lb, db, kr, sep = ""))
+  }
+  
+  ########################
+  # Execution ############
+  ########################
+  
+  # Prepare boat data frame
+  boat <- boat_data_preparation(boat_data)
+  # Import weather NCDF file and do some data processing
+  weather <- weather_data_preparation(weather_path)
+  # Merge the processed datasets according to time, longitude and latitude
+  merged <- merge_data(boat, weather)
+  # Return the result
+  return(merged)
+}
+
+path <- "aut_08.csv"
+boat <- getmo(fread(path))[,c("time","lon","lat","speed","bearing","value")]
+weather_path <- "feb-apr-piranboja.csv"
+
+boat_data <- boat
+weather_path <- weather_path
+
+merged.data <- merge_wb(boat_data = boat, weather_path = weather_path)
+merged.data$value <- merged.data$value - stats_comp[1,"median"]
+
+# Visualization
+oneDevice <- merged.data[merged.data$st_x != 0 & merged.data$st_y != 0, ]
+
+# Get a bounding box
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 10, scale = 1, center)
+
+# Write to a file
+png(filename='test_01.png', width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = value), size = 5, alpha = 1) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow")
+
+# Close file
+dev.off()
+
+# Write to a file
+png(filename='test_02.png', width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = sailpoint), size = 5, alpha = 1)
+  # scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow", midpoint = 1033)
+
+# Close file
+dev.off()
+
+```
+
+Data analysis
+```{r}
+
+# Visualization
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-04-21 23:59:59"), ]
+
+# Get a bounding box
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 10, scale = 1, center)
+
+# Write to a file
+png(filename='test_01.png', width=4096,height=4096,units="px",res=100)
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = value), size = 5, alpha = 1) +
+  scale_colour_gradient2(low = "green", high = "red", guide = "colourbar", mid = "yellow")
+
+# Close file
+dev.off()
+
+```
+
+
+Auto-correlation & Cross-correlation
+```{r}
+# 
+# acf(odsa$value)
+# acf(odmo$value)
+# 
+# length(odsa$value)
+# smasa <- sma(odsa$value)
+# smamo <- sma(odmo$value)
+# plot(smasa[["fitted"]], type = "l")
+# plot(smamo[["fitted"]], type = "l")
+
+ccf(odsa$value, odmo$value)
+ccf(nte$saval, nte$moval)
+ccf(ate$saval, ate$moval)
+
+ccf(atexyz$zsa, atexyz$xmo)
+ccf(atexyz$zsa, atexyz$ymo)
+ccf(atexyz$zsa, atexyz$zmo)
+```
+
+```{r}
+shift <- function(x, n, invert=FALSE, default=NA){
+  stopifnot(length(x)>=n)
+  if(n==0){
+    return(x)
+  }
+  n <- ifelse(invert, n*(-1), n)
+  if(n<0){
+    n <- abs(n)
+    forward=FALSE
+  }else{
+    forward=TRUE
+  }
+  if(forward){
+    return(c(rep(default, n), x[seq_len(length(x)-n)]))
+  }
+  if(!forward){
+    return(c(x[seq_len(length(x)-n)+n], rep(default, n)))
+  }
+}
+
+shift
+```
+
+```{r}
+Find_Max_CCF<- function(a,b)
+{
+ d <- ccf(a, b, plot = FALSE)
+ cor = d$acf[,,1]
+ lag = d$lag[,,1]
+ res = data.frame(cor,lag)
+ res_max = res[which.max(res$cor),]
+ return(res_max)
+} 
+
+mmax <- Find_Max_CCF(combVal$saval, combVal$moval)
+```
+
+Similarity function
+```{r}
+findMatches <- function(tmps, tmpm, timint) {
+  stom <- NULL
+  for(i in 1:nrow(tmps)) {
+    tim <- as.numeric(as.POSIXct(tmps[[i, "created"]]))
+    val <- tmps[[i, "value"]]
+    match <- NULL
+    for(j in 1:nrow(tmpm)) {
+      diff <- abs(val - tmpm[[j, "value"]])
+      if(abs(tim - as.numeric(as.POSIXct(tmpm[[j, "created"]]))) < timint & (is.null(match) | diff < abs(val - as.numeric(as.POSIXct(tmpm[[j, "created"]]))))) {
+        match <- tmpm[j,]
+      }
+    }
+    if(!is.null(match)) {
+      match <- cbind(match, tmps[i,])
+      stom <- rbind(stom, match)
+    }
+  }
+  return(stom)
+}
+timint <- 30
+
+stom <- findMatches(odsa, odmo, timint)
+mtos <- findMatches(odmo, odsa, timint)
+
+matches <- NULL
+for(i in 1:nrow(stom)) {
+  tim1 <- stom[i,1]
+  tim2 <- stom[i,7]
+  for(j in 1:nrow(mtos)) {
+    if(tim1 == mtos[j,7] & tim2 == mtos[j,1]) {
+      matches <- rbind(matches, stom[i,])
+    }
+  }
+}
+
+names(matches)[4] <- "value1"
+names(matches)[10] <- "value2"
+matches$avgVal <- (matches$value1 + matches$value2) / 2
+
+
+tmp <- data.frame(time = as.POSIXct(matches$created), avg = matches$avgVal)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+rm(tim1, tim2)
+# rm(tmps, tmpm, timint, match)
+```
+
+Thresholding
+```{r}
+otsu <- function(x) {
+  res <- 0
+  val <- 0
+  for(i in (min(x)+1):(max(x)-1)) {
+    lows <- sum(x[x < i])
+    higs <- sum(x[x >= i])
+    lowm <- mean(x[x < i])
+    higm <- mean(x[x >= i])
+    sigma <- lows * higs * (lowm - higm) ^2
+    if(sigma > val) {
+      res <- i
+      val <- sigma
+    }
+  }
+  return(res)
+}
+
+niblack <- function(x, k = 1, window = 25) {
+  res <- rep(0,length(x))
+  o <- mean(x) + sd(x)
+  for(i in (window + 1):(length(x) - window)) {
+    t <- mean(x[i-window:i+window]) + k * sd(x[i-window:i+window])
+    if(t < x[i] & o < x[i]) {
+      res[i] <- 1
+    } else {
+      res[i] <- 0
+    }
+  }
+    return(res)
+}
+
+k <- 1
+w <- 10
+
+tmp <- data.frame(time = ate$time, sa = ate$saval, niblack = niblack(ate$saval, k, w) * 3000 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+tmp <- data.frame(time = ate$time, sa = ate$saval, otsu = ifelse(otsu(ate$saval) > ate$saval, 0, 1) * 3000 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+tmp <- data.frame(time = ate$time, mo = ate$moval, niblack = niblack(ate$moval, k, w) * 500 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+tmp <- data.frame(time = ate$time, mo = ate$moval, otsu = ifelse(otsu(ate$moval) > ate$moval, 0, 1) * 500 + 1000)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+tmp <- data.frame(time = ate$time, sa = niblack(ate$saval, k, w), mo = niblack(ate$moval, k, w))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+
+tmp <- data.frame(time = ate$time,  sa = ifelse(otsu(ate$saval) > ate$saval, 0, 1),  mo = ifelse(otsu(ate$moval) > ate$moval, 0, 1))
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line()
+rm(tmp,plotdf)
+```
+
+
+
+```{r}
+  weather_data_preparation <- function(weather_path) {
+
+    a <- grib2netcdf(weather_path, "tmpnc")
+    ncin <- nc_open("tmpnc")
+    
+    lon <- ncvar_get(ncin, "lon")
+    lat <- ncvar_get(ncin, "lat")
+    
+    capture.output(
+    tryCatch(
+    {
+      u_component_of_wind <- ncvar_get(ncin, "u-component_of_wind_height_above_ground")
+      time_var <- strsplit(as.character(ncatt_get(ncin, "u-component_of_wind_height_above_ground", "coordinates")["value"]), split = " ")
+      time_var <- get_timevar(time_var)
+      time <- ncvar_get(ncin, time_var)
+    }, error = function(e) {
+    })
+    )
+    capture.output(
+    tryCatch(
+    {
+      u_component_of_wind <- ncvar_get(ncin, "10_metre_U_wind_component_surface")
+      time_var <- strsplit(as.character(ncatt_get(ncin, "10_metre_U_wind_component_surface", "coordinates")["value"]), split = " ")
+      time_var <- get_timevar(time_var)
+      time <- ncvar_get(ncin, time_var)
+    }, error = function(e) {
+    })
+    )
+    capture.output(
+    tryCatch(
+    {
+      v_component_of_wind <- ncvar_get(ncin, "v-component_of_wind_height_above_ground")
+      time_var <- strsplit(as.character(ncatt_get(ncin, "v-component_of_wind_height_above_ground", "coordinates")["value"]), split = " ")
+    }, error = function(e) {
+    })
+    )
+    capture.output(
+    tryCatch(
+    {
+      v_component_of_wind <- ncvar_get(ncin, "10_metre_V_wind_component_surface")
+      time_var <- strsplit(as.character(ncatt_get(ncin, "10_metre_V_wind_component_surface", "coordinates")["value"]), split = " ")
+    }, error = function(e) {
+    })
+    )
+    
+    time_base <- as.POSIXct(unlist(strsplit(ncatt_get(ncin, "time", "units")$value, split = " "))[3], tz = "UTC")
+
+    nc_close(ncin)
+    file.remove("tmpnc")
+
+    weather.merge <- melt(u_component_of_wind)
+    colnames(weather.merge) <- c("lon","lat","time","u_comp")
+    weather.merge$lon <- lon[weather.merge$lon]
+    weather.merge$lat <- lat[weather.merge$lat]
+    weather.merge$v_comp <- melt(v_component_of_wind)[ ,"value"]
+
+    weather.merge$time <- weather.merge$time - 1
+    basetime <- as.POSIXct(time_base, tz = "UTC", format = "%Y-%m-%d %H:%M:%S")
+    tint <- sort(time)[2] - sort(time[1])
+    weather.merge$date <- time_base + weather.merge$time * (3600 * tint)
+          
+    weather.merge$lon <- round(weather.merge$lon,3)
+    weather.merge$lat <- round(weather.merge$lat,3)
+    
+    weather.merge$wind_direction <- atan2((weather.merge$u_comp * -1), (weather.merge$v_comp * -1)) * (180/pi)
+    weather.merge$wind_direction <- ifelse(weather.merge$wind_direction < 0, weather.merge$wind_direction + 360, weather.merge$wind_direction)
+    
+    weather.merge$wind_speed <- sqrt(weather.merge$u_comp^2 + weather.merge$v_comp^2)
+    return(weather.merge)
+  }
+```
+
+Correlate with weather data
+```{r}
+merge_wb <- function(boat_data, weather_path, directory = "") {
+  
+  ########################
+  # Main functions #######
+  ########################
+  
+  ### Format of boat data:
+  # POSIXct -> time of creation
+  # numeric -> longitude
+  # numeric -> latitude
+  # numeric -> speed
+  # numeric -> bearing
+  
+  # DONE
+  boat_data_preparation <- function(boat_data) {
+    # Exclude all rows with any NA values
+    boats.merge <- na.omit(boat_data)
+    # Rename the columns
+    colnames(boats.merge) <- c("created","st_x","st_y","speed","bearing","shock")
+    # Trim the date
+    boats.merge$created <- as.character(substr(boats.merge$created,1,19))
+    # and convert it to POSIXct class
+    boats.merge$date <- as.POSIXct(boats.merge$created, tz = "UTC")
+    return(boats.merge)
+  } 
+    
+  # DONE
+  weather_data_preparation <- function(weather_path) {
+    
+    # Take the GRIB path file and convert it to netcdf file
+    a <- grib2netcdf(weather_path, "tmpnc")
+    # Open the netcdf file
+    ncin <- nc_open("tmpnc")
+  
+    # Get all variable names
+    variables <- names(ncin[['var']])
+    
+    # Get Lon and Lat variables
+    lon <- ncvar_get(ncin, "lon")
+    lat <- ncvar_get(ncin, "lat")
+    
+    # Find the wind component names
+    i <- grep("component+", variables)
+    uvar <- variables[i[1]]
+    vvar <- variables[i[2]]
+
+    # Extract the u component of wind from the netcdf file
+    i <- 1
+    uvars <- c(uvar, "u-component_of_wind_height_above_ground","10_metre_U_wind_component_surface")
+    u_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        u_component_of_wind <- ncvar_get(ncin, uvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(u_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(uvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind u-component not found.")
+      }
+    }
+    
+    # Extract the v component of wind from the netcdf file
+    i <- 1
+    vvars <- c(vvar, "v-component_of_wind_height_above_ground","10_metre_V_wind_component_surface")
+    v_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        v_component_of_wind <- ncvar_get(ncin, vvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(v_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(vvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind v-component not found.")
+      }
+    }
+    
+    # Get the time variable name
+    time_var <- strsplit(as.character(ncatt_get(ncin, vvars[i], "coordinates")["value"]), split = " ")
+    time_var <- get_timevar(time_var)
+    # Extract the time variable from the netcdf file
+    time <- ncvar_get(ncin, time_var)
+    
+    # Find the starting time 
+    time_base <- as.POSIXct(unlist(strsplit(ncatt_get(ncin, time_var, "units")$value, split = " "))[3], tz = "UTC")
+
+    # Close and remove the netcdf file
+    nc_close(ncin)
+    file.remove("tmpnc")
+
+    # Prepare the dataframe for processing
+    weather.merge <- melt(u_component_of_wind)
+    # Change the column names 
+    colnames(weather.merge) <- c("lon","lat","time","u_comp")
+    # Insert longitude, latitude and v component into the dataframe
+    weather.merge$lon <- lon[weather.merge$lon]
+    weather.merge$lat <- lat[weather.merge$lat]
+    weather.merge$v_comp <- melt(v_component_of_wind)[ ,"value"]
+
+    # Prepare the time column for processing
+    weather.merge$time <- weather.merge$time - 1
+    # Set the starting time of the data set
+    basetime <- as.POSIXct(time_base, tz = "UTC", format = "%Y-%m-%d %H:%M:%S")
+    # Get the time interval
+    tint <- sort(time)[2] - sort(time[1])
+    # Insert time into the dataframe
+    weather.merge$date <- time_base + weather.merge$time * (3600 * tint)
+          
+    # Round longitude and latitude for easier data comparison later on
+    weather.merge$lon <- round(weather.merge$lon,3)
+    weather.merge$lat <- round(weather.merge$lat,3)
+    
+    # Calculate wind direction based on u and v component of wind
+    weather.merge$wind_direction <- atan2((weather.merge$u_comp * -1), (weather.merge$v_comp * -1)) * (180/pi)
+    weather.merge$wind_direction <- ifelse(weather.merge$wind_direction < 0, weather.merge$wind_direction + 360, weather.merge$wind_direction)
+    
+    # Calculate wind speed based on u and v component of wind
+    weather.merge$wind_speed <- sqrt(weather.merge$u_comp^2 + weather.merge$v_comp^2)
+    return(weather.merge)
+  }
+  
+  # DONE
+  merge_predictions <- function(weather_path, time_limits, directory = "") {
+    res <- NULL
+    start_time <- time_limits[1]
+    stop_time <- time_limits[2]
+    # Merge multiple weather prediction files (works with a single file as well)
+    for(i in 1:length(weather_path)) {
+      tmpw <- weather_data_preparation(paste(directory, weather_path[i], sep = ""))
+      tmpw$set <- i
+      
+      res <- res[res$date < min(tmpw$date), ]
+      res <- rbind(res, tmpw)
+      print(paste("File ",weather_path[i]," successfully processed."))
+    }
+    return(res)
+  }
+  
+  # DONE
+  merge_data <- function(tmpb, tmpw) {
+    # Round longitude, latitude and date from boat dataset to the interval, provided by the weather dataset
+    tmpb$date <- as.POSIXct(roundToIntervalNoBarModified(as.numeric(tmpb$date), as.numeric(unique(tmpw$date))), origin = "1970-01-01 00:00:00", tz = "UTC")
+    tmpb$lon <- roundToIntervalNoBarModified(tmpb$st_x, sort(unique(tmpw$lon)))
+    tmpb$lat <- roundToIntervalNoBarModified(tmpb$st_y, sort(unique(tmpw$lat)))
+    
+    # Convert both data frames to data tables to reduce running time
+    df1 <- data.table(tmpb, key = c("lon","lat","date"))
+    df2 <- data.table(tmpw, key = c("lon","lat","date"))
+    # Merge the data
+    merged.data <- df2[df1]
+    
+    # Calculate the sailpoint (wind direction, relative to the boats bearing)
+    merged.data$sailpoint <- sailpoint2.2(merged.data)
+    
+    # Sort the data according to time
+    merged.data <- merged.data[order(merged.data$created), ]
+    return(merged.data)
+  }
+  ########################
+  # Auxiliary functions ##
+  ########################
+
+  roundToIntervalNoBarModified <- function(data, interval) {
+    for(i in 1:length(data)) {
+      data[i] = interval[which.min(abs(interval-data[i]))]
+    }
+    return(data)
+  }
+  
+  sailpoint2.2 <- function(df) {
+    # Some implementations fix
+    bea <- as.numeric(df$bearing)
+    wdir <- as.numeric(df$wind_direction)
+    # Set the angle for what to be considered front and back of the boat
+    premec <- 70
+    bok <- 110
+    # Convert bearing from 360 to 180 scale
+    df$bearing[df$bearing > 180] <- df$bearing[df$bearing > 180] - 360
+    # Calculate the angles between wind direction and bearing
+    angle <- bea - wdir
+    # Classify angles in four different classes (front, left side, right side, back)
+    pr <- ifelse(abs(angle) <= premec | abs(angle) >= 360 - premec, "PREMEC", "")
+    lb <- ifelse(angle >= ((360 - premec) * -1) & angle <= ((360 - bok) * -1) | 
+            angle >= premec & angle <= bok, "LEVI_BOK", "")  
+    db <- ifelse(angle >= (bok * -1) & angle <= (premec * -1) |
+            angle >= (360 - bok) & angle <= (360 - premec), "DESNI_BOK", "")
+    kr <- ifelse(abs(angle) >= bok & abs(angle) <= (360 - bok), "KRMA", "")
+    # Join the classes and return the result
+    return(paste(pr, lb, db, kr, sep = ""))
+  }
+  
+  grib2netcdf <- function(grib, out) {
+    # Call executed in CMD(not sure how it works on Linux, probably runs in bash?) netcdfAll-4.6.10.jar has to be placed in the same folder as the project to work
+    (shell( 
+      paste("java -Xmx512m -classpath netcdfAll-4.6.10.jar ucar.nc2.dataset.NetcdfDataset -in ",grib," -out ",out, sep = ""),
+      intern = TRUE
+    ))
+    # Remove files, other than the one we need to minimize the clutter
+    (file.remove(paste(grib,".gbx9", sep = "")))
+    (file.remove(paste(grib,".ncx3", sep = "")))
+  }
+  
+  get_timevar <- function(time_var) {
+    # Convert list to a vector
+    time_var <- unlist(time_var)
+    # Check for all known time variables, otherwise throw an error
+    if(any(time_var == "time")) {
+      return("time")
+    }
+    else if(any(time_var == "time1")) {
+      return("time1")
+    }
+    else if(any(time_var == "time2")) {
+      return("time2")
+    }
+    else {
+      stop("No time found.")
+    } 
+  }
+  ########################
+  # Execution ############
+  ########################
+  
+  # Prepare boat data frame
+  boat <- boat_data_preparation(boat_data)
+  print("Boat data preparation completed.")
+  # Import weather NCDF file and do some data processing
+  weather <- merge_predictions(weather_path, 
+                               directory = directory, 
+                               time_limits = c(min(boat$date), max(boat$date)))
+  print("Weather data preparation completed.")
+  # Merge the processed datasets according to time, longitude and latitude
+  merged <- merge_data(boat, weather)
+  print("Data merged.")
+  # Return the result
+  return(merged)
+}
+
+boat_path <- "aut_08.csv"
+
+merged.data <- merge_wb(
+  boat_data =  getmo(fread(boat_path))[,c("created","lon","lat","speed","bearing","value")], 
+  weather_path = weather_path
+  )
+
+# weather_path <- "asiecda_2017042100.grb"
+# weather_path <- "asiecda_2017042200.grb"
+# weather_path <- "adria_fc_20170402_0.125x0.125.grb"
+
+rm(boat_path, weather_path)
+```
+
+Classify types of movement
+```{r}
+# 3, 4, 6, 7
+# boat <- boat8
+# tmpb <- getmo(boat)
+# tmpb <- tmpb[tmpb$lon != 0 & tmpb$lat != 0, ]
+id <- 8
+
+tmpb <- fread(paste("merged_0",id,".csv", sep = ""))
+tmpb$created <- as.POSIXct((tmpb$created))
+
+w <- 8
+a <- 3
+
+# tmpb$value <- smth.gaussian(normalize(tmpb$value), window = w, alpha = a, tails = TRUE)
+# tmpb$speed <- smth.gaussian(normalize(tmpb$speed), window = w, alpha = a, tails = TRUE)
+# tmpb$bearing <- smth.gaussian(normalize(tmpb$bearing), window = w, alpha = a, tails = TRUE)
+
+
+spt <- findRun(tmpb$speed)
+stat1 <- tmpb[1:spt[1],]
+run <- tmpb[(spt[1] + 1):spt[2],]
+stat2 <- tmpb[(spt[2] + 1):nrow(tmpb),]
+
+stat1 <- cut_time(stat1, min = 45, pos = "end")
+stat2 <- cut_time(stat2, min = 45, pos = "start")
+
+# cot <-moved(tmpb$lon, tmpb$lat)
+# stat1co <- tmpb[1:cot[1],]
+# runco <- tmpb[(cot[1] + 1):cot[2],]
+# stat2co <- tmpb[(cot[2] + 1):nrow(tmpb),]
+
+# stat1$value <- stat1$value - median(stat1$value)
+# run$value <- run$value - median(run$value)
+# stat2$value <- stat2$value - median(stat2$value)
+
+stat1$value <- stat1$shock - stats_comp[2,"median"]
+run$value <- run$shock - stats_comp[1,"median"]
+stat2$value <- stat2$shock - stats_comp[2,"median"]
+
+sl <- 5
+fast <- run[run$speed > sl, ]
+slow <- run[run$speed <= sl, ]
+
+# stat1co$value <- stat1co$value - median(stat1co$value)
+# runco$value <- runco$value - median(runco$value)
+# stat2co$value <- stat2co$value - median(stat2co$value)
+# 
+# fastco <- runco[runco$speed > sl, ]
+# slowco <- runco[runco$speed <= sl, ]
+
+tmp <- stat1
+tstat <- stats_comp[2,"sd"]
+trun <- stats_comp[1,"sd"]
+
+# png(filename=paste("stat1_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+# tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), stat1 = tmp$value, wind_speed = tmp$wind_speed * 10)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line() +
+#        geom_hline(yintercept=tstat) +
+#        geom_hline(yintercept=-tstat)
+# dev.off()
+
+png(filename=paste("run_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+tmp <- run
+t <- sd(tmp$value)
+tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), run = tmp$value, wind_speed = tmp$wind_speed * 100)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=trun) + geom_hline(yintercept=-trun) +
+       geom_hline(yintercept=trun * 2) + geom_hline(yintercept=trun * 3)
+dev.off()
+
+png(filename=paste("stat2_0",id,".png", sep = ""), width=1024,height=1024,units="px",res=100)
+tmp <- stat2
+t <- sd(tmp$value)
+tmp <- data.frame(time = as.POSIXct(tmp$created, origin = "1970-01-01 00:00:00"), stat2 = tmp$value, wind_speed = tmp$wind_speed * 10)
+plotdf <- melt(tmp, id = "time")
+ggplot(data = plotdf,
+       aes(x = time, y = value, colour = variable)) +
+       geom_line() +
+       geom_hline(yintercept=tstat) +
+       geom_hline(yintercept=-tstat)
+dev.off()
+
+# tmp <- stat1co
+# t <- sd(tmp$value)
+# tmp <- data.frame(time = tmp$time, stat1 = tmp$value)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line() +
+#        geom_hline(yintercept=t) +     
+#        geom_hline(yintercept=-t)
+# 
+# tmp <- runco
+# t <- sd(tmp$value)
+# tmp <- data.frame(time = tmp$time, run = tmp$value)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line() +
+#        geom_hline(yintercept=t) +     
+#        geom_hline(yintercept=-t)
+# 
+# tmp <- stat2co
+# t <- sd(tmp$value)
+# tmp <- data.frame(time = tmp$time, stat2 = tmp$value)
+# plotdf <- melt(tmp, id = "time")
+# ggplot(data = plotdf,
+#        aes(x = time, y = value, colour = variable)) +
+#        geom_line() +
+#        geom_hline(yintercept=t) +     
+#        geom_hline(yintercept=-t)
+
+rm(tmp,plotdf)
+
+statssp <- data.frame(
+  state = c("stat1","run","stat2","fast","slow"), 
+  maxval = c(max(stat1$value), max(run$value), max(stat2$value), max(fast$value), max(slow$value)), 
+  maxin = c(max(stat1[stat1$value < sd(stat1$value), "value"]), max(run[run$value < sd(run$value), "value"]), max(stat2[stat2$value < sd(stat2$value), "value"]), max(fast[fast$value < sd(fast$value), "value"]), max(slow[slow$value < sd(slow$value), "value"])), 
+  minval = c(min(stat1$value), min(run$value), min(stat2$value), min(fast$value), min(slow$value)), minin = c(min(stat1[stat1$value > -sd(stat1$value), "value"]), min(run[run$value > -sd(run$value), "value"]), min(stat2[stat2$value > -sd(stat2$value), "value"]), min(fast[fast$value > -sd(fast$value), "value"]), min(slow[slow$value > -sd(slow$value), "value"])), 
+  sd = c(sd(stat1$value), sd(run$value), sd(stat2$value), sd(fast$value), sd(slow$value)))
+
+# statsco <- data.frame(state = c("stat1","run","stat2","fast","slow"), maxval = c(max(stat1co$value), max(runco$value),  max(stat2co$value), max(fastco$value),  max(slowco$value)), maxin = c(max(stat1co[stat1co$value < sd(stat1co$value), "value"]), max(runco[runco$value < sd(runco$value), "value"]), max(stat2co[stat2co$value < sd(stat2co$value), "value"]), max(fastco[fastco$value < sd(fastco$value), "value"]), max(slowco[slowco$value < sd(slowco$value), "value"])), minval = c(min(stat1co$value), min(runco$value), min(stat2co$value), min(fastco$value), min(slowco$value)), minin = c(min(stat1co[stat1co$value > -sd(stat1co$value), "value"]), min(runco[runco$value > -sd(runco$value), "value"]), min(stat2co[stat2co$value > -sd(stat2co$value), "value"]), min(fastco[fastco$value > -sd(fastco$value), "value"]), min(slowco[slowco$value > -sd(slowco$value), "value"])), sd = c(sd(stat1co$value), sd(runco$value), sd(stat2co$value), sd(fastco$value), sd(slowco$value)))
+
+# measdif <- cot - spt
+# oneDevice <- run
+# t <- median(oneDevice$value)
+# # Get a bounding box
+# sbbox <- make_bbox(lon = oneDevice$lon, lat = oneDevice$lat)
+# map <- qmap(location = sbbox, zoom = 13, scale = 1, center)
+# # Write to a file
+# png(filename='shock_01.png', width=4096,height=4096,units="px",res=100)
+# # Plot the map and points
+# map +
+#   geom_point(data = oneDevice, aes(x = lon, y = lat, color = value), size = 5, alpha = 1) +
+#   scale_colour_gradient2(low = "green", high = "red", guide = "colourbar",  midpoint = t)
+# # Close file
+# dev.off()
+
+# rm(a, cot, sl, spt, t, w, fast, fastco, run, runco, slow, slowco, stat1, stat1co, stat2, stat2co, tmpb, boat, trun, tstat, i, fname, run_comp, stat_comp, statssp)
+
+sd1 <- 0
+sd2 <- 0
+sd3 <- 0
+for(i in 1:nrow(run)) {
+  if(abs(run[i,"value"]) > trun) {
+    sd1 <- sd1 + 1
+    if(abs(run[i,"value"]) > trun * 2) {
+      sd2 <- sd2 + 1
+      if(abs(run[i,"value"]) > trun * 3) {
+        sd3 <- sd3 + 1
+      }
+    }  
+  }
+}
+
+sd1 <- sd1 / nrow(run) * 100
+sd2 <- sd2 / nrow(run) * 100
+sd3 <- sd3 / nrow(run) * 100
+rm(sd1, sd2, sd3)
+
+rm(fast, run, slow, stat1, stat2, statssp, tmpb, a, sl, spt, t, trun, tstat, w, i, id)
+```
+
+
+to_xy <- function(mag, ang) {
+  if(ang <= 90) {
+    mask <- c(1,1)
+  } else if(ang <= 180) {
+    ang <- ang - 90
+    mask <- c(1,-1)
+  } else if(ang <= 270) {
+    ang <- ang - 180
+    mask <- c(-1,-1)
+  } else if(ang < 360) {
+    ang <- ang - 270
+    mask <- c(-1,1)
+  }
+  return(c(mag * cos(pi/2 - ang), mag * cos(ang)))
+}
+
+adjust_windspeed <- function(x, speed_units = "knots", windspeed_units = "m/s") {
+  if(speed_units == "knots") {
+    speed <- x$speed * 0.51444
+  } else {
+    speed <- x$speed
+  }
+  if(windspeed_units == "knots") {
+    wind_speed <- x$wind_speed * 0.51444
+  } else {
+    wind_speed <- x$wind_speed
+  }
+  
+  boat_coord <- NULL
+  wind_coord <- NULL
+  for(i in 1:nrow(x)) {
+    boat_coord <- rbind(boat_coord, to_xy(speed[i], x[i,"bearing"]))
+    wind_coord <- rbind(wind_coord, to_xy(wind_speed[i], x[i,"wind_direction"]))
+  }
+  
+  
+  x1 <- unlist(boat_coord[,1])
+  y1 <- unlist(boat_coord[,2])
+  
+  x2 <- unlist(wind_coord[,1])
+  y2 <- unlist(wind_coord[,2])
+  
+  x0 <- 0
+  y0 <- 0
+  
+  return(abs(x2*y1 - y2*x1) / sqrt((y2-y1)^2+(x2-x1)^2))
+}
+
+
+
+```{r}
+system.time(read.csv("firstclass_may.csv"))
+system.time(fread("firstclass_may.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1387 @@
+---
+title: "Shock amplitude report"
+author: "Andraz Krasovec"
+date: "08.06.2017"
+output: 
+  html_notebook:
+      toc: true
+      toc_depth: 2
+      number_sections: true
+      fig_caption: true
+---
+
+<!-- Set working library, import packages and remove all variables, except functions -->
+```{r, include=FALSE}
+setwd("D:/Sola/Diploma/shock_sensor_analysis")
+
+library("ggmap")
+library("ggplot2")
+library("data.table")
+# library("smooth")
+# library("signal")
+# library("stats")
+# library("smoother")
+# library("rpart")
+# library("GGIR")
+# library("randomForest")
+# library("CORElearn")
+# library("gapminder")
+# library("gganimate")
+# library("animation")
+library("ncdf4")
+# library("ncdf4.helpers")
+# library("doParallel")
+# library("raster")
+# library("plotly")
+
+# Remove all objects except functions
+rm(list = setdiff(ls(), lsf.str()))
+```
+
+<!-- All the functions needed for this report to work -->
+```{r, include=FALSE}
+# Functions
+
+# Rename grib files to a uniform format
+rename_files <- function(wd = "D:/Sentinel/ai-research/shock_sensor_analysis/", path = "GRIB") {
+  setwd(wd)
+  files <- dir(path)
+  for(i in 1:length(files)) {
+    start <- as.numeric(regexpr("2", files[i]))
+    file.rename(
+                from = paste(path, "/", files[i], sep = ""),
+                to = paste(path, "/", substr(files[i], start, start + 3),"-",substr(files[i],start + 4, start + 5),"-",substr(files[i], start + 6, start + 7), ".grb", sep = "")
+                )
+  }
+  
+  rm(files, i, start)  
+}
+# Merge boat and weather dataset by longitude, latitude and time
+merge_wb <- function(boat_path, directory = "GRIB/", boat_variables = "", sensor_name, boat_idx = -1) {
+  
+  ########################
+  # Main functions #######
+  ########################
+  
+  ### Required fields ###
+  # created -> timestemp (character)
+  # st_x -> longitude (numeric)
+  # st_y -> latitude (numeric)
+  # speed -> speed of travel (numeric)
+  # bearing -> direction of travel (numeric)
+
+  # DONE
+  boat_data_preparation <- function(boat_path, boat_variables, sensor_name, boat_idx) {
+    
+    if(boat_variables != "") {
+      boat_variables <- c("boat_id","created","st_x","st_y","speed","bearing","value", boat_variables)  
+    } else {
+      boat_variables <- c("boat_id","created","st_x","st_y","speed","bearing","value")
+    }
+    
+    boat <- fread(boat_path)
+    
+    if(boat_idx != -1) {
+      boat <- subset(boat, subset = name == sensor_name & boat_id == boat_idx, select = boat_variables)
+    } else {
+      boat <- subset(boat, subset = name == sensor_name, select = boat_variables)
+    }
+
+    boat <- na.omit(boat)
+    
+    boat$date <- as.POSIXct(boat$created, tz = "UTC")
+    
+    return(boat)
+  } 
+    
+  # DONE
+  weather_data_preparation <- function(weather_path) {
+    
+    # Take the GRIB path file and convert it to netcdf file
+    a <- grib2netcdf(weather_path, "tmpnc")
+    # Open the netcdf file
+    ncin <- nc_open("tmpnc")
+  
+    # Get all variable names
+    variables <- names(ncin[['var']])
+    
+    # Get Lon and Lat variables
+    lon <- ncvar_get(ncin, "lon")
+    lat <- ncvar_get(ncin, "lat")
+    
+    # Find the wind component names
+    i <- grep("component+", variables)
+    uvar <- variables[i[1]]
+    vvar <- variables[i[2]]
+
+    # Extract the u component of wind from the netcdf file
+    i <- 1
+    uvars <- c(uvar, "u-component_of_wind_height_above_ground","10_metre_U_wind_component_surface")
+    u_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        u_component_of_wind <- ncvar_get(ncin, uvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(u_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(uvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind u-component not found.")
+      }
+    }
+    
+    # Extract the v component of wind from the netcdf file
+    i <- 1
+    vvars <- c(vvar, "v-component_of_wind_height_above_ground","10_metre_V_wind_component_surface")
+    v_component_of_wind <- NULL
+    while(TRUE) {
+      capture.output(tryCatch({
+        v_component_of_wind <- ncvar_get(ncin, vvars[i])
+      }, error = function(e) {
+      }))
+      if(!is.null(v_component_of_wind)) {
+        break
+      }
+      i <- i + 1
+      if(i > length(vvars)) {
+        nc_close(ncin)
+        file.remove("tmpnc")
+        stop("Wind v-component not found.")
+      }
+    }
+    
+    # Get the time variable name
+    time_var <- strsplit(as.character(ncatt_get(ncin, vvars[i], "coordinates")["value"]), split = " ")
+    time_var <- get_timevar(time_var)
+    # Extract the time variable from the netcdf file
+    time <- ncvar_get(ncin, time_var)
+    
+    # Find the starting time 
+    time_base <- as.POSIXct(unlist(strsplit(ncatt_get(ncin, time_var, "units")$value, split = " "))[3], tz = "UTC")
+
+    # Close and remove the netcdf file
+    nc_close(ncin)
+    file.remove("tmpnc")
+
+    # Prepare the dataframe for processing
+    weather.merge <- melt(u_component_of_wind)
+    # Change the column names 
+    colnames(weather.merge) <- c("lon","lat","time","u_comp")
+    # Insert longitude, latitude and v component into the dataframe
+    weather.merge$lon <- lon[weather.merge$lon]
+    weather.merge$lat <- lat[weather.merge$lat]
+    weather.merge$v_comp <- melt(v_component_of_wind)[ ,"value"]
+
+    # Prepare the time column for processing
+    weather.merge$time <- weather.merge$time - 1
+    # Set the starting time of the data set
+    basetime <- as.POSIXct(time_base, tz = "UTC", format = "%Y-%m-%d %H:%M:%S")
+    # Get the time interval
+    tint <- sort(time)[2] - sort(time[1])
+    # Insert time into the dataframe
+    weather.merge$date <- time_base + weather.merge$time * (3600 * tint)
+          
+    # Round longitude and latitude for easier data comparison later on
+    weather.merge$lon <- round(weather.merge$lon,3)
+    weather.merge$lat <- round(weather.merge$lat,3)
+    
+    # Calculate wind direction based on u and v component of wind
+    weather.merge$wind_direction <- atan2((weather.merge$u_comp * -1), (weather.merge$v_comp * -1)) * (180/pi)
+    weather.merge$wind_direction <- ifelse(weather.merge$wind_direction < 0, weather.merge$wind_direction + 360, weather.merge$wind_direction)
+    
+    # Calculate wind speed based on u and v component of wind
+    weather.merge$wind_speed <- sqrt(weather.merge$u_comp^2 + weather.merge$v_comp^2)
+    return(weather.merge)
+  }
+  
+  # DONE
+  merge_predictions <- function(time_limits, files) {
+    res <- NULL
+    
+    # Get all files from a directory and cut the file extension
+    dates <- substr(dir(paste(getwd(), "/", files, sep = "")),1,10)
+    # Get only the date of start and end of the route
+    start <- as.Date(time_limits[1])
+    stop <- as.Date(time_limits[2])
+
+    # Find correlating weather file with the start of the route
+    for(i in 1:length(dates)) {
+      if(start == dates[i]) {
+        start <- i
+        break
+      } else if(start < dates[i]) {
+        start <- i - 1
+        break
+      }
+    }
+    if(start == 0)
+      start <- 1
+    # Find correlating weather file with the end of the route
+    for(i in start:length(dates)) {
+      if(stop <= dates[i]) {
+        stop <- i
+        break
+      }
+      if(i == length(dates)) {
+        stop <- i
+      }
+    }
+    
+    # Paste the extension back to the results
+    weather_path <- paste(dates[start:stop], ".grb", sep = "")
+    
+    # Merge multiple weather prediction files (works with a single file as well)
+    for(i in 1:length(weather_path)) {
+      tmpw <- weather_data_preparation(paste(files, weather_path[i], sep = ""))
+      tmpw$set <- i
+      
+      res <- res[res$date < min(tmpw$date), ]
+      res <- rbind(res, tmpw)
+      print(paste("Weather file",weather_path[i],"successfully processed."))
+    }
+    return(res)
+  }
+  
+  # DONE
+  merge_data <- function(tmpb, tmpw) {
+    # Round longitude, latitude and date from boat dataset to the interval, provided by the weather dataset
+    tmpb$date <- as.POSIXct(roundToIntervalNoBarModified(as.numeric(tmpb$date), as.numeric(unique(tmpw$date))), origin = "1970-01-01 00:00:00", tz = "UTC")
+    tmpb$lon <- roundToIntervalNoBarModified(tmpb$st_x, sort(unique(tmpw$lon)))
+    tmpb$lat <- roundToIntervalNoBarModified(tmpb$st_y, sort(unique(tmpw$lat)))
+    
+    # Convert both data frames to data tables to reduce running time
+    df1 <- data.table(tmpb, key = c("lon","lat","date"))
+    df2 <- data.table(tmpw, key = c("lon","lat","date"))
+    # Merge the data
+    merged.data <- df2[df1]
+    
+    # Calculate the sailpoint (wind direction, relative to the boats bearing)
+    merged.data$sailpoint <- sailpoint2.2(merged.data)
+    
+    # Sort the data according to time
+    merged.data <- merged.data[order(merged.data$created), ]
+    return(merged.data)
+  }
+  ########################
+  # Auxiliary functions ##
+  ########################
+
+  roundToIntervalNoBarModified <- function(data, interval) {
+    for(i in 1:length(data)) {
+      data[i] = interval[which.min(abs(interval-data[i]))]
+    }
+    return(data)
+  }
+  
+  sailpoint2.2 <- function(df) {
+    # Some implementations fix
+    bea <- as.numeric(df$bearing)
+    wdir <- as.numeric(df$wind_direction)
+    # Set the angle for what to be considered front and back of the boat
+    premec <- 70
+    bok <- 110
+    # Convert bearing from 360 to 180 scale
+    df$bearing[df$bearing > 180] <- df$bearing[df$bearing > 180] - 360
+    # Calculate the angles between wind direction and bearing
+    angle <- bea - wdir
+    # Classify angles in four different classes (front, left side, right side, back)
+    pr <- ifelse(abs(angle) <= premec | abs(angle) >= 360 - premec, "PREMEC", "")
+    lb <- ifelse(angle >= ((360 - premec) * -1) & angle <= ((360 - bok) * -1) | 
+            angle >= premec & angle <= bok, "LEVI_BOK", "")  
+    db <- ifelse(angle >= (bok * -1) & angle <= (premec * -1) |
+            angle >= (360 - bok) & angle <= (360 - premec), "DESNI_BOK", "")
+    kr <- ifelse(abs(angle) >= bok & abs(angle) <= (360 - bok), "KRMA", "")
+    # Join the classes and return the result
+    return(paste(pr, lb, db, kr, sep = ""))
+  }
+  
+  grib2netcdf <- function(grib, out) {
+    # Call executed in CMD netcdfAll-4.6.10.jar has to be placed in the same folder as the project to work
+    (shell( 
+      paste("java -Xmx512m -classpath netcdfAll-4.6.10.jar ucar.nc2.dataset.NetcdfDataset -in ",grib," -out ",out, sep = ""),
+      intern = TRUE
+    ))  
+    # Remove files, other than the one we need to minimize the clutter
+    (file.remove(paste(grib,".gbx9", sep = "")))
+    (file.remove(paste(grib,".ncx3", sep = "")))
+  }
+  
+  get_timevar <- function(time_var) {
+    # Convert list to a vector
+    time_var <- unlist(time_var)
+    # Check for all known time variables, otherwise throw an error
+    if(any(time_var == "time")) {
+      return("time")
+    }
+    else if(any(time_var == "time1")) {
+      return("time1")
+    }
+    else if(any(time_var == "time2")) {
+      return("time2")
+    }
+    else {
+      stop("No time found.")
+    } 
+  }
+  ########################
+  # Execution ############
+  ########################
+  
+  # Prepare boat data frame
+  boat <- boat_data_preparation(boat_path, boat_variables, sensor_name, boat_idx)
+  print("Boat data preparation completed.")
+  # Import weather NCDF file and do some data processing
+  weather <- merge_predictions(time_limits = c(min(boat$date), max(boat$date)),
+                               files = directory)
+  print("Weather data preparation completed.")
+  # Merge the processed datasets according to time, longitude and latitude
+  merged <- merge_data(boat, weather)
+  print("Data merged.")
+  # Return the result 
+  return(merged)
+}
+# Normalization
+normalize <- function(x) {
+  return((x - mean(x)) / sd(x))
+}
+# Filter out false data
+clean_data <- function(x) {
+  dirty <- NULL
+  for(i in 1:nrow(x)) {
+    if(!(x[i,"shock"] > 10000 & x[i,"bearing"] < 1 & x[i,"speed"] < 1)) {
+      # res <- rbind(res, x[i])
+    } else {
+      print(paste("Row removed!"))
+      print(paste("Boat ID:",x[i,"boat_id"],"Shock:",x[i,"shock"],"Bearing:",x[i,"bearing"],"Speed:",x[i,"speed"]))
+      dirty <- c(dirty, i)
+    }
+  }
+  if(is.null(dirty))
+    return(x)
+  else
+    return(x[-dirty,])
+}
+# Filter out false data
+clean_data_full <- function(x) {
+  dirty <- NULL
+  tmp <- x[x$name == "Shock amplitude" | x$name == "Acceleration" | x$name == "Acceleration 1" | x$name == "Acceleration 2", ]
+  x <- x[x$name != "Shock amplitude",]
+  for(i in 1:nrow(tmp)) {
+    if(tmp[i,"speed"] < 1 & abs(tmp[i,"bearing"]) < 1 & tmp[i,"value"] > 10000) {
+      print(paste("Row removed!"))
+      print(paste("Boat ID:",tmp[i,"boat_id"],"Shock:",tmp[i,"value"],"Bearing:",tmp[i,"bearing"],"Speed:",tmp[i,"speed"]))
+      dirty <- c(dirty, i)
+    }
+  }
+  if(is.null(dirty))
+    return(rbind(x,tmp))
+  else
+    return(rbind(x, tmp[-dirty,]))
+}
+# Get parts of the track, that includes points when the boat was moving
+get_run <- function(tmpb) {
+  # Find parts of the route where the boat is actually moving
+  runs <- find_runs(tmpb$speed)
+  if(is.null(runs)) {
+    return(NULL)
+  }
+  # Concat all runs in one data frame and everything else into another
+  run <- NULL
+  for(i in seq(1,length(runs),2)) {
+    if(nrow(tmpb) == runs[i+1]) {
+      tmp <- tmpb[runs[i]:runs[i+1],]
+    } else {
+      tmp <- tmpb[runs[i]:(runs[i+1] - 1),]      
+    }
+    tmp$num <- i %/% 2 + 1
+    run <- rbind(run, tmp)
+  }
+  return(run)
+}
+# Get parts of the track, that includes points when the boat was standing still
+get_stat <- function(tmpb) {
+  # Find parts of the route where the boat is actually moving
+  runs <- find_runs(tmpb$speed)
+  if(is.null(runs)) {
+    return(NULL)
+  }
+  # Concat all runs in one data frame and everything else into another
+  stat <- NULL
+  for(i in seq(1,length(runs),2)) {
+    # Stat
+    if(i == 1) {
+      stat <- tmpb[i:(runs[i] - 1),]
+      stat$num <- i
+    } else if(i == length(runs) - 1) {
+      tmp <- tmpb[runs[i-1]:(runs[i] - 1),]
+      tmp$num <- i%/%2 + 1
+      stat <- rbind(stat, tmp)
+      if(runs[i+1] != nrow(tmpb)) {
+        tmp <- tmpb[runs[i+1]:nrow(tmpb),]
+        tmp$num <- i%/%2 + 2
+        stat <- rbind(stat, tmp)        
+      }
+    } else {
+      tmp <- tmpb[runs[i-1]:(runs[i] - 1),]
+      tmp$num <- i%/%2 + 1
+      stat <- rbind(stat, tmp)
+    }
+  }
+  return(stat)
+}
+# Find indices that correlate with points where the boat stopped andd start moving
+find_runs <- function(speed) {
+  s <- NULL
+  i <- 1
+  empty <- FALSE
+  while(speed[i] == 0 | speed[(i+1)] == 0 | speed[(i+2)] == 0) {
+    i <- i + 1
+    if((i + 2) >= length(speed)) {
+      empty <- TRUE
+      break
+    }
+  }
+  while(TRUE & !empty) {
+    s <- c(s, i)
+    while(TRUE) {
+      if((i + 2) > length(speed)) {
+        i <- length(speed)
+        break
+      }
+      if(speed[i] == 0 & speed[i + 1] == 0 & speed[i + 2] == 0) {
+        break
+      }
+      else {
+        i <- i + 1
+      }
+    }
+    s <- c(s, i)
+    if(i >= length(speed))
+      break
+    while(speed[i] == 0 | speed[(i+1)] == 0 | speed[(i+2)] == 0) {
+      i <- i +1
+      if((i + 2) > length(speed))
+        break
+    }
+  }
+  return(s)
+}
+```
+
+***
+# Analiza outlierjev pri Shock amplitude
+
+## Uvod
+Gre za toèke (outlierje), ki od povpreèja odstopajo za veè kot 1000 (1G). To so toèke, ki potencialno predstavljajo trk, zato je pomembno da vsak tak odklon razumemo in ga znamo razložiti.
+
+
+## Podatki
+```{r, include=FALSE}
+data <- fread("firstclass_may.csv")
+data <- clean_data_full(data)
+
+shock <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock amplitude")
+colnames(shock)[colnames(shock) == "value"] <- "shock"
+shock <- clean_data(shock)
+shock$wind_speed_norm <- (shock$wind_speed - mean(shock$wind_speed) / sd(shock$wind_speed))
+shock$shock <- shock$shock - mean(shock$shock)
+
+run <- NULL
+stat <- NULL
+
+ids <- unique(shock$boat_id)
+ids <- ids[order(ids)]
+
+for(i in 1:length(ids)) {
+  cond <- shock$boat_id == ids[i]
+  
+  tmp <- shock[cond, ]  
+  
+  run <- rbind(run, get_run(tmp))
+  stat <- rbind(stat, get_stat(tmp))
+}
+
+run_out <- run[abs(run$shock) > 1000, ]
+stat_out <- stat[abs(stat$shock) > 1000, ]
+outliers <- rbind(run_out, stat_out)
+```
+
+Podatki so sestavljeni iz podatkov pridobljenih z meritev s senzorjev in vremenskih podatkov pridobljenih z zunanjega vira. Združeni so po èasu in geografskih koordinatah. Spodaj so predstavljene le toèke, opisane v uvodu (outlierji).
+```{r, echo=FALSE}
+tmp <- outliers[order(created),] 
+colnames(tmp)[colnames(tmp) == "shock"] <- "Shock amplitude"
+tmp[,c("boat_id", "created", "st_x", "st_y", "speed", "bearing", "Shock amplitude", "wind_speed", "sailpoint")]
+```
+
+
+## Delitev na plovbo in mirovanje
+
+Spodnji histogrami prikazujejo število vseh outlierjev (Combined), tiste, ki so se zgodili med plovbo (Run) in tiste, ki so se zgodili, ko je plovilo stalo na mestu (Stat). X os predstavlja vrednost odmika od povpreèja za Shock amplitude, medtem ko Y os predstavlja število zabeleženih toèk pri posamezni vrednosti Shock amplitude.
+
+S histogramov je razvidno, da do outlierjev prihaja tako med plovbo, kot tudi v mirovanju in da se vrednosti Shock amplitude gibljejo od 1000 (1G) do 4000 (4G).
+```{r, echo=FALSE}
+# png(filename = "Diploma/01.png", width = 512, height = 512)
+ggplot(outliers, aes(outliers$shock)) + geom_histogram(bins = 8) +  labs(x = "Jakost Shock amplitude", y = "Število toèk")
+# dev.off()
+# png(filename = "Diploma/02.png", width = 512, height = 512)
+ggplot(run_out, aes(run_out$shock)) + geom_histogram(bins = 8) +  labs(x = "Jakost Shock amplitude", y = "Število toèk")
+# dev.off()
+# png(filename = "Diploma/03.png", width = 512, height = 512)
+ggplot(stat_out, aes(stat_out$shock)) + geom_histogram(bins = 8) +  labs(x = "Jakost Shock amplitude", y = "Število toèk")
+# dev.off()
+```
+
+## Geografski prikaz toèk
+
+Spodnji zemljevidi prikazujejo geografsko lokacijo outlierjev. Po vrsti si sledijo: zemljevid z vsemi outlierji, nato še loèeni na plovbo in mirovanje. Barva toèk predstavlja jakost Shock amplitude.
+
+Ponvno lahko ugotovimo, da do outlierjev prihaja tako med plovbo, kot v mirovanju.
+
+```{r, warning=FALSE, message=FALSE, error=FALSE, echo=FALSE}
+oneDevice <- outliers
+# Get a bounding box
+invisible(sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y))
+invisible(map <- qmap(location = sbbox, zoom = 9, scale = 1, center))
+
+# Plot the map and points
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 2, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow") +
+  ggtitle("Combined outliers") + 
+  labs(caption = "Slika 1.4.1")
+
+oneDevice <- run_out
+# Plot the map and points
+# png(filename = "Diploma/04.png", width = 1024, height = 1024)
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 6, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow") +
+  labs(color = "Shock amplitude")
+# dev.off()
+
+oneDevice <- stat_out
+# Plot the map and points
+# png(filename = "Diploma/05.png", width = 1024, height = 1024)
+map +
+  geom_point(data = oneDevice, aes(x = st_x, y = st_y, color = shock), size = 6, alpha = 1) +
+  scale_colour_gradient2(low = "blue", high = "red", guide = "colourbar", mid = "yellow") +
+  labs(color = "Shock amplitude")
+# dev.off()
+
+# tmp <- data[as.POSIXct(data$created) == as.POSIXct("2017-05-14 08:32:31+00"),]
+```
+
+## Sailpoint
+
+Podatke, pridobljene s èolna samega, smo povezali z vremenskimi podatki, ki nam omogoèajo boljši vpogled v dejansko dogajanje na èolnu. Ena najpomembnejšh stvari, ki se jih iz združenih podatkov lahko nauèimo, je zagotovo sailpoint - smer vetra, relativna na smer plovbe. Histogram predstavlja število outlierjev za vsak klasifikacijski razred.
+
+Po prièakovanjih se najveè outlierjev pripeti med plovbo z vetrom ali v veter, medtem ko je moènejših delovanj sil med vetrom v bok, bistveno manj.
+
+```{r, warning=FALSE, message=FALSE, error=FALSE, echo=FALSE}
+# png(filename = "Diploma/06.png", width = 512, height = 512)
+ggplot(outliers, aes(outliers$sailpoint)) + geom_histogram(stat = "count") +  labs(x = "Klasifikacijski razred", y = "Število toèk")
+# dev.off()
+```
+
+### Sprememba smeri pri vetru v krmo
+
+V kolikor jadrnica pri vetru v krmo spremeni smer, pogosto pride do zanihanja jadra z ene strani na drugo, kar povzroèi sunek in ga lahko zaznamo kot outlier. Spodaj so izrisani vsi outlierji med plovbo, pri vetru v krmo (oznaèeni z rdeèo). 
+
+Opazimo lahko, da zgolj v enem primeru dejansko pride do korelacije med outlierjem in spremembo smeri plovbe in sicer najnižja toèka na sliki 1.5.1.4. Pri vseh ostalih toèkah potrebujemo nadaljno analizo.
+
+```{r, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+krma <- outliers[outliers$sailpoint == "KRMA" & outliers$speed > 0, ]
+premec <- outliers[outliers$sailpoint == "PREMEC" & outliers$speed > 0, ]
+levi_bok <- outliers[outliers$sailpoint == "LEVI_BOK" & outliers$speed > 0, ]
+desni_bok <- outliers[outliers$sailpoint == "DESNI_BOK" & outliers$speed > 0, ]
+
+idx <- c(1877, 1879, 1880, 1881, 1882)
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+i <- 1
+oneDevice <- run[run$boat_id == idx[i], ]
+
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-05-14 14:30:00+00") & oneDevice$created < as.POSIXct("2017-05-14 15:30:00+00"),]
+
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 12, scale = 1, center)
+
+map +
+geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 1) +
+geom_point(data = premec[premec$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "blue", size = 1)+
+geom_point(data = krma[krma$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "red", size = 1) +
+geom_point(data = levi_bok[levi_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "orange", size = 1) +
+geom_point(data = desni_bok[desni_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "green", size = 1) +
+  labs(caption = "Slika 1.5.1.1")
+
+i <- 2
+oneDevice <- run[run$boat_id == idx[i], ]
+
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-05-14 14:30:00+00") & oneDevice$created < as.POSIXct("2017-05-15 08:00:00+00"),]
+
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 13, scale = 1, center)
+
+map +
+geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 1) +
+geom_point(data = premec[premec$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "blue", size = 1)+
+geom_point(data = krma[krma$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "red", size = 1) +
+geom_point(data = levi_bok[levi_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "orange", size = 1) +
+geom_point(data = desni_bok[desni_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "green", size = 1) + 
+  labs(caption = "Slika 1.5.1.2")
+
+i <- 4
+oneDevice <- run[run$boat_id == idx[i], ]
+a <- oneDevice
+
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-05-15 00:00:00+00") & oneDevice$created < as.POSIXct("2017-05-15 08:00:00+00"),]
+
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 14, scale = 1, center)
+
+map +
+geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 1) +
+geom_point(data = premec[premec$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "blue", size = 1)+
+geom_point(data = krma[krma$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "red", size = 1) +
+geom_point(data = levi_bok[levi_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "orange", size = 1) +
+geom_point(data = desni_bok[desni_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "green", size = 1) +
+  labs(caption = "Slika 1.5.1.3")
+
+oneDevice <- a
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-05-15 08:45:00+00") & oneDevice$created < as.POSIXct("2017-05-15 09:40:00+00"),]
+
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 13, scale = 1, center)
+
+png(filename = "Diploma/07.png", width = 1024, height = 1024)
+map +
+geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 6) +
+geom_point(data = oneDevice[29, ], aes(x = st_x, y = st_y), color = "red", size = 6)
+
+dev.off()
+
+oneDevice <- a
+oneDevice <- oneDevice[oneDevice$created > as.POSIXct("2017-05-17 09:00:00+00") & oneDevice$created < as.POSIXct("2017-05-17 20:00:00+00"),]
+
+sbbox <- make_bbox(lon = oneDevice$st_x, lat = oneDevice$st_y)
+map <- qmap(location = sbbox, zoom = 14, scale = 1, center)
+
+map +
+geom_point(data = oneDevice, aes(x = st_x, y = st_y), color = "yellow", size = 1) +
+geom_point(data = premec[premec$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "blue", size = 1)+
+geom_point(data = krma[krma$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "red", size = 1) +
+geom_point(data = levi_bok[levi_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "orange", size = 1) +
+geom_point(data = desni_bok[desni_bok$boat_id == idx[i], ], aes(x = st_x, y = st_y), color = "green", size = 1) +
+  labs(caption = "Slika 1.5.1.5")
+```
+
+
+
+## Hitrost vetra
+
+Prièakovali bi da je število outlierjev in jakost sunkov premo sorazmerna s hitrostjo vetra, saj višja hitrost pomeni višje valove in druge dejavnike, ki vplivajo na poveèanje velikosti sil, ki vplivajo na èoln.
+
+Vendar že prvi histogram, ki prikazuje število toèk pri posamezni hitrosti vetra, pravi drugaèno zgodbo. Porazdelitev toèk je približno normalna (rdeèa navpièna èrta predstavlja povpreèno hitrost vetra), kar odstopa od prièakovanj in kaže na to, da hitrost vetra nima veèjega vpliva na proizvajanje outlierjev.
+```{r, echo=FALSE}
+png(filename = "Diploma/08.png", height = 512, width = 512)
+ggplot(outliers, aes(outliers$wind_speed)) + geom_histogram(bins = 8) + 
+  geom_vline(xintercept = mean(outliers$wind_speed), color = "red") +
+  xlab("Hitrost vetra [m/s]") + ylab("Število toèk")
+dev.off()
+```
+
+Do podobnih zakljuèkov lahko pridemo tudi pri drugem grafu, ki namesto števila, prikazuje jakost vsakega posameznega sunka. Razberemo lahko tudi, da najmoènejši sunki nastajajo pri relativno povpreèni hitrosti vetra.
+```{r, echo=FALSE}
+ggplot(outliers, aes(x = wind_speed, y = shock)) + geom_point() + xlab("Hitrost vetra [m/s]") + ylab("Jakost Shock amplitude")  +labs(caption = "Slika 1.6.2") +
+geom_vline(xintercept = mean(outliers$wind_speed), color = "red")
+```
+
+### Normalizacija
+
+Ker smo pri zogrnjih grafih upoštevali samo hitrosti vetra pri outlierjih, nismo upoštevali celotne slike, brez katere težko izpeljemo ustrezne zakljuèke. Zato smo pred izloèanjem outlierjev hitrost vetra normalizirali: $$Wind\,speed = (Wind\,speed - \mu(Wind\,speed))/\sigma(Wind\,speed)$$
+
+Za potrditev zgornjih rezultatov, bi prièakovali, da bo veèina outlierjev skoncentrirana okoli nule, ki zaradi normalizacije predstavlja povpreèno hitrost vetra (rdeèa navpièna èrta). Izkaže se, da le obstaja korelacija med hitrostjo vetra in outlierji, saj je povpreèna hitrost vetra pri outlierjih precej višja (zelena navpièna èrta), kar pomeni da outlierji v povpreèju nastajajo pri višji hitrosti vetra od povpreène.
+```{r, echo=FALSE}
+png(filename = "Diploma/09.png", height = 512, width = 512)
+ggplot(outliers, aes(outliers$wind_speed_norm)) + geom_histogram(bins = 8) + 
+  geom_vline(xintercept = 0, color = "red") +
+  geom_vline(xintercept = mean(outliers$wind_speed_norm), color = "green") +
+  xlab("Hitrost vetra [m/s]") + ylab("Število toèk")
+dev.off()
+```
+
+```{r, echo=FALSE}
+ggplot(outliers, aes(x = wind_speed_norm, y = shock)) + geom_point() + xlab("Hitrost vetra [m/s]") + ylab("Jakost Shock amplitude")  +labs(caption = "Slika 1.6.1.2") +
+  geom_vline(xintercept = 0, color = "red") +
+  geom_vline(xintercept = mean(outliers$wind_speed_norm), color = "green")
+
+```
+
+
+
+## Hitrost plovbe
+
+Naslednji dejavnik, ki vpliva na Shock amplitude je hitrost plovbe. Ker je hitrost plovbe v mirovanju 0 m/s, tukaj opazujemo zgolj toèke, ki so bile zabeležene med samo plovbo. Izkaže se, da pri višjih hitrostih nastaja veè sunkov, najbolj izstopa dejstvo, da so vsi sunki, višji od 2G nastali pri visokih hitrostih. 
+```{r, echo=FALSE}
+png(filename = "Diploma/10.png", height = 512, width = 512)
+ggplot(run_out, aes(x = speed, y = shock)) + geom_point() + 
+    geom_vline(xintercept = mean(run_out$speed), color = "red") +
+  xlab("Hitrost èolna [m/s]") + ylab("Jakost Shock amplitude")
+dev.off()
+```
+
+Vendar, ko zraven prikažemo še toèke, ki so nastale v mirovanju, se slika pokvari, saj jakost sunkov med mirovanjem celo preseže jakost sunkov med plovbo.
+```{r, echo=FALSE}
+png(filename = "Diploma/11.png", height = 512, width = 512)
+ggplot(outliers, aes(x = speed, y = shock)) + geom_point() + 
+    geom_vline(xintercept = mean(outliers$speed), color = "red") +
+  xlab("Hitrost èolna [m/s]") + ylab("Jakost Shock amplitude")
+dev.off()
+```
+
+
+## Èas dneva
+
+Vplivajoèi dejavnik je tudi kdaj je do posameznega outlierja prišlo, saj je morje zjutraj in zveèer mirnejše kot èez dan. Rdeèi èrti predstavljata dnevni interval med sedmo uro dopoldne in sedmo uro popoldne.
+
+Pokaže se trend, da veliko outlierjev nastane v èasu ko se èolni odpravljajo na plovbo in prihajajo v pristanišèe.
+```{r, echo=FALSE}
+png(filename = "Diploma/12.png", height = 512, width = 512)
+ggplot(outliers, aes(outliers$time)) + geom_histogram(bins = 17) + 
+  geom_vline(xintercept = c(7,19), color = "red") + xlab("Èas dneva [h]") + ylab("Število toèk")
+dev.off()
+```
+
+### Izplutje in pristajanje
+
+Vsa plovila, najsi gre za jadrnice ali motorne èolne, pri izhodu in vstopu v marino uporabljajo motor. Ob zagonu motorja pride pri vsakem plovilu do moènega sunka, kar lahko povzroèi outlierje. Spodnji grafi prikazujejo posamezne èolne skozi èasovni interval veèih dni.
+
+Najprej lahko opazimo, da je korelacija med vžigom motorja in zaèetkom ter koncem plovbe skoraj popolna, kar potrjuje, da vsa plovila v tej fazi plovbe plujejo na motor. Vžig motorja na grafu predstavlja dvig napetosti akumulatorja, saj se le-ta ob prižganem motorju polni.
+
+Primeri, ko ob tem pride do nastanka outlierja ali vsaj višje vrednosti sile sunka, niso tako pogosti in so tudi pri isti barki v razponu veè dni precej nekonsistentni. Kljub temu je težko ovreèi, da zagon motorja pri doloèenih èolnih obèasno ne povzroèi veèjega odstopanja.
+
+```{r, echo=FALSE}
+tmpa <- data[data$name == "Shock amplitude", ]
+tmpv <- data[data$name == "Battery Voltage",]
+
+ids <- unique(tmpa$boat_id)
+ids <- ids[order(ids)]
+ids <- ids[c(1,7:8,10)]
+
+tmpa$value <- abs(tmpa$value - mean(tmpa$value))
+tmpv$value <- tmpv$value * 100 - 500
+
+all_outliers <- NULL
+
+for(i in 1:length(ids)) {
+
+  tmp <- tmpa[tmpa$boat_id == ids[i], ]
+  tmp <- tmp[order(created),]
+  outliers <- tmp[tmp$value > 1000, ]
+  all_outliers <- rbind(all_outliers, outliers)
+  
+  runs <- find_runs(tmp$speed)
+  
+  day1 <- as.POSIXct("2017-05-14 00:00:00+00")
+  day2 <- as.POSIXct("2017-05-15 00:00:00+00")
+  day3 <- as.POSIXct("2017-05-16 00:00:00+00")
+  day4 <- as.POSIXct("2017-05-17 00:00:00+00")
+
+  b1 <- NULL
+  b2 <- NULL
+  b3 <- NULL
+  b4 <- NULL
+  
+  if(!is.null(runs)) {
+    for(j in 1:length(runs)) {
+      if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day2) {
+        b1 <- c(b1, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day3) {
+        b2 <- c(b2, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else if(as.POSIXct(as.character(tmp[runs[j], "created"])) < day4) {
+        b3 <- c(b3, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      } else {
+        b4 <- c(b4, as.POSIXct(as.character(tmp[runs[j], "created"])))
+      }
+    }
+  }
+    
+  values <- rbind(
+    tmpa[tmpa$boat_id == ids[i], c("created", "name", "value")],
+    tmpv[tmpv$boat_id == ids[i], c("created", "name", "value")]
+  )
+  
+  colnames(values) <- c("created", "Spremenljivka", "value")
+  values$created <- as.POSIXct(values$created)
+  
+  tmp1 <- values[values$created > day1 & values$created <= day2,]
+  tmp2 <- values[values$created > day2 & values$created <= day3,]
+  tmp3 <- values[values$created > day3 & values$created <= day4,]
+  tmp4 <- values[values$created > day4,]
+
+  
+  out1 <- NULL
+  out2 <- NULL
+  out3 <- NULL
+  out4 <- NULL
+  
+  val1 <- NULL
+  val2 <- NULL
+  val3 <- NULL
+  val4 <- NULL
+  
+  com1 <- NULL
+  com2 <- NULL
+  com3 <- NULL
+  com4 <- NULL
+    
+  out1 <- outliers[outliers$created > day1 & outliers$created <= day2, "created"]
+  out2 <- outliers[outliers$created > day2 & outliers$created <= day3, "created"]
+  out3 <- outliers[outliers$created > day3 & outliers$created <= day4, "created"]
+  out4 <- outliers[outliers$created > day4, "created"]
+    
+  val1 <- outliers[outliers$created > day1 & outliers$created <= day2, "value"]
+  val2 <- outliers[outliers$created > day2 & outliers$created <= day3, "value"]
+  val3 <- outliers[outliers$created > day3 & outliers$created <= day4, "value"]
+  val4 <- outliers[outliers$created > day4, "value"]
+  
+  if(nrow(out1) > 0) {
+    out1 <- (as.POSIXct(as.vector(unlist(out1))))
+    val1 <- as.numeric(unlist(val1))
+    com1 <- data.frame(x = out1, y = val1)
+  } else {
+    out1 <- NULL
+    val1 <- NULL
+    com1 <- NULL
+  }
+  if(nrow(out2) > 0) {
+    out2 <- (as.POSIXct(as.vector(unlist(out2))))
+    val2 <- as.numeric(unlist(val2))
+    com2 <- data.frame(x = out2, y = val2)
+  } else {
+    out2 <- NULL
+    val2 <- NULL
+    com2 <- NULL
+  }
+  if(nrow(out3) > 0) {
+    out3 <- (as.POSIXct(as.vector(unlist(out3))))
+    val3 <- as.numeric(unlist(val3))
+    com3 <- data.frame(x = out3, y = val3)
+  } else {
+    out3 <- NULL
+    val3 <- NULL
+    com3 <- NULL
+  }
+  if(nrow(out4) > 0) {
+    out4 <- (as.POSIXct(as.vector(unlist(out4))))
+    val4 <- as.numeric(unlist(val4))
+    com4 <- data.frame(x = out4, y = val4)
+  } else {
+    out4 <- NULL
+    val4 <- NULL
+    com4 <- NULL
+  }
+    
+  com <- rbind(com1, com2, com3, com4)
+  size <- 4
+  
+  print(
+    ggplot(values, aes(x = created, y = value, colour = Spremenljivka)) + 
+    geom_line()+ 
+    geom_vline(xintercept = c(b1,b2,b3,b4)) + 
+    geom_point(data = com, aes(x = x, y = y), color = "red", size = size) + 
+    labs(x = "Èas", y = "Skalirana vrednost", caption = paste("Slika 1.8.1.",i, sep=""))
+  )
+  
+  if(i == 2) {
+    png(filename = "Diploma/13.png", height = 512, width = 512)
+    print(
+      ggplot(values, aes(x = created, y = value, colour = Spremenljivka)) + 
+      geom_line()+ 
+      geom_vline(xintercept = c(b1,b2,b3,b4)) + 
+      geom_point(data = com, aes(x = x, y = y), color = "red", size = size) + 
+      labs(x = "Èas", y = "Skalirana vrednost")
+    )
+    dev.off()
+  }
+}
+```
+
+```{r, echo=FALSE}
+rm(a, all_outliers, com, com1, com2, com3, com4, desni_bok, krma, levi_bok, oneDevice, outliers, premec, tmp, tmp1, tmp2, tmp3, tmp4, tmpa, tmpv, values, b1, b2, b3, b4, day1, day2, day3, day4, i, ids, idx, j, map, out1, out2, out3, out4, runs, sbbox, size, val1, val2, val3, val4, cond)
+# rm(stat, stat_out, run, run_out, shock, data)
+```
+
+
+
+***
+# Analiza outlierjev po komponentah
+
+## Uvod
+Podobno kot v prejšnjem poglavju, se tudi tukaj ukvarjamo z odkloni sil, veèjih od 1000 (1G). Edina razlika je, da namesto Shock amplitude-a, ki je: $Shock\,amplitude = \sqrt{x^2 + y^2 + z^2}$, analiziramo vsako komponento (x, y, z) posebej.
+
+## Podatki
+```{r, include=FALSE}
+data_xyz <- fread("firstclass_may.csv")
+data_xyz <- clean_data_full(data_xyz)
+
+data_x <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration")
+data_y <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 1")
+data_z <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Acceleration 2")
+
+colnames(data_x)[colnames(data_x) == "value"] <- "shock"
+colnames(data_y)[colnames(data_y) == "value"] <- "shock"
+colnames(data_z)[colnames(data_z) == "value"] <- "shock"
+```
+
+```{r, include=FALSE}
+ids <- unique(data_x$boat_id)
+ids <- ids[order(ids)]
+
+rout <- NULL
+sout <- NULL
+
+for(i in 1:length(ids)) {
+  condx <- data_x$boat_id == ids[i]
+  condy <- data_y$boat_id == ids[i]
+  condz <- data_z$boat_id == ids[i]
+  
+  tmpx <- data_x[condx,]
+  tmpy <- data_y[condy,]
+  tmpz <- data_z[condz,]
+  
+  tmp <- cbind(tmpx, tmpx$shock, tmpy$shock, tmpz$shock)
+  colnames(tmp)[colnames(tmp) == "V2"] <- "x"
+  colnames(tmp)[colnames(tmp) == "V3"] <- "y"
+  colnames(tmp)[colnames(tmp) == "V4"] <- "z"
+  tmp$shock <- sqrt(tmp$x^2 + tmp$y^2 + tmp$z^2)
+
+  tmpr <- get_run(tmp)  
+  tmps <- get_stat(tmp)  
+    
+  tmpr$mean <- mean(tmpr$shock)
+  tmpr$meanx <- mean(tmpr$x)
+  tmpr$meany <- mean(tmpr$y)
+  tmpr$meanz <- mean(tmpr$z)
+  
+  tmpr$delta <- abs(tmpr$shock - mean(tmpr$shock))
+  tmpr$deltax <- abs(tmpr$x - mean(tmpr$x))
+  tmpr$deltay <- abs(tmpr$y - mean(tmpr$y))
+  tmpr$deltaz <- abs(tmpr$z - mean(tmpr$z))
+  
+  rout <- rbind(rout, tmpr[tmpr$deltax > 1000 | tmpr$deltay > 1000 | tmpr$deltaz > 1000,])    
+
+  tmps$mean <- mean(tmps$shock)
+  tmps$meanx <- mean(tmps$x)
+  tmps$meany <- mean(tmps$y)
+  tmps$meanz <- mean(tmps$z)
+  
+  tmps$delta <- abs(tmps$shock - mean(tmps$shock))
+  tmps$deltax <- abs(tmps$x - mean(tmps$x))
+  tmps$deltay <- abs(tmps$y - mean(tmps$y))
+  tmps$deltaz <- abs(tmps$z - mean(tmps$z))
+  
+  sout <- rbind(sout, tmps[tmps$deltax > 1000 | tmps$deltay > 1000 | tmps$deltaz > 1000,])
+}
+
+rout <- rout[rout$created != as.POSIXct("2017-05-14 12:24:03+00") & rout$created != as.POSIXct("2017-05-14 12:05:06+00"),]
+
+rout$idx <- seq(1,nrow(rout),1)
+sout$idx <- seq(1,nrow(sout),1)
+
+for(i in 1:nrow(rout)) {
+  rout[i,"highest_delta"] <- which.max(c(rout[i,"deltax"], rout[i,"deltay"], rout[i,"deltaz"]))
+}
+for(i in 1:nrow(sout)) {
+  sout[i,"highest_delta"] <- which.max(c(sout[i,"deltax"], sout[i,"deltay"], sout[i,"deltaz"]))
+}
+
+rout$out_num <- 0
+rout$out_num <- ifelse(rout$deltax > 1000, rout$out_num + 1, rout$out_num)
+rout$out_num <- ifelse(rout$deltay > 1000, rout$out_num + 1, rout$out_num)
+rout$out_num <- ifelse(rout$deltaz > 1000, rout$out_num + 1, rout$out_num)
+
+sout$out_num <- 0
+sout$out_num <- ifelse(sout$deltax > 1000, sout$out_num + 1, sout$out_num)
+sout$out_num <- ifelse(sout$deltay > 1000, sout$out_num + 1, sout$out_num)
+sout$out_num <- ifelse(sout$deltaz > 1000, sout$out_num + 1, sout$out_num)
+```
+
+Zopet imamo na voljo podatke meritev s plovil, povezanih z vremenskimi podatki. Shock amplitude je tu nadomešèen z vrednostmi vsake komponente posebej.
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+tmp <- rbind(rout, sout)
+tmp <- tmp[order(created),] 
+colnames(tmp)[colnames(tmp) == "shock"] <- "Shock amplitude"
+tmp[,c("boat_id", "created", "st_x", "st_y", "speed", "bearing", "x", "y", "z", "wind_speed", "sailpoint")]
+```
+
+## Orientacija naprav
+
+Prva koristna informacija, ki jo lahko opazimo, je da naprave niso povsod enako namešèene, kar pomeni, da ista komponenta pospeškometra v razliènih napravah ne kaže v isto smer.
+
+```{r, include=FALSE}
+data_count <- data_xyz[data_xyz$name == "Shock Count", ]
+
+data_xyz <- data.frame(
+  boat_id = data_x$boat_id,
+  created = data_x$created,
+  speed = data_x$speed,
+  bearing = data_x$bearing,
+  st_x = data_x$st_x,
+  st_y = data_x$st_y,
+  x_value = data_x$shock,
+  y_value = data_y$shock,
+  z_value = data_z$shock,
+  shock = sqrt(data_x$shock^2 + data_y$shock^2 + data_z$shock^2),
+  sailpoint = data_x$sailpoint,
+  wind_speed = data_x$wind_speed,
+  count = data_count$value
+)
+data_xyz <- clean_data(data_xyz)
+
+ids <- c(1873, 1880)
+```
+
+Èe primerjamo dve razlièni napravi, lahko ugotovimo, da se vsaka komponenta giba okoli vrednosti 1000, 0 ali -1000. Iz tega se lahko nauèimo katera komponeta je usmerjena vertikalno. 
+
+Pri sliki 2.3.1 je razvidno, da je navpièna komponenta os y in da je usmerjena navzdol, saj njena vrednost niha okoli 1000 (1G), do èesar pride zarad delovanja gravitacijske sile. Slika 2.3.2 prikazuje drugaèno zgodbo. Komponenta, ki kaže navpièno, je os z in je usmerjena navzgor, saj vrednost niha okoli -1000 (-1G).
+```{r, echo=FALSE}
+tmpb <- data_xyz[data_xyz$boat_id == ids[1],]
+
+x <- tmpb$x_value - mean(tmpb$x_value)
+y <- tmpb$y_value - mean(tmpb$y_value)
+z <- tmpb$z_value - mean(tmpb$z_value)
+
+del <- NULL
+for(j in 1:length(x)) {
+  if(abs(x[j]) > 1000 | abs(y[j]) > 1000 | abs(z[j]) > 1000) {
+    del <- c(del, j)
+  }
+}
+
+if(!is.null(del)) {
+  tmpb <- tmpb[setdiff(1:nrow(tmpb),c(del)),]
+}
+tmp <- data.frame(created = as.POSIXct(tmpb$created), x = (tmpb$x_value), y = (tmpb$y_value), z = (tmpb$z_value))
+
+png(filename = "Diploma/14.png", height = 512, width = 512)
+plotdf <- melt(tmp, id = "created")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() + 
+        labs(x = "Èas", y = "Sila [mG]", colour = "Os")
+dev.off()
+```
+
+```{r, echo=FALSE}
+tmpb <- data_xyz[data_xyz$boat_id == ids[2],]
+
+x <- tmpb$x_value - mean(tmpb$x_value)
+y <- tmpb$y_value - mean(tmpb$y_value)
+z <- tmpb$z_value - mean(tmpb$z_value)
+
+del <- NULL
+for(j in 1:length(x)) {
+  if(abs(x[j]) > 1000 | abs(y[j]) > 1000 | abs(z[j]) > 1000) {
+    del <- c(del, j)
+  }
+}
+
+if(!is.null(del)) {
+  tmpb <- tmpb[setdiff(1:nrow(tmpb),c(del)),]
+}
+tmp <- data.frame(created = as.POSIXct(tmpb$created), x = (tmpb$x_value), y = (tmpb$y_value), z = (tmpb$z_value))
+
+png(filename = "Diploma/15.png", height = 512, width = 512)
+plotdf <- melt(tmp, id = "created")
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() + 
+        labs(x = "Èas", y = "Sila [mG]", colour = "Os")
+dev.off()
+```
+
+Po natanènejšem pregledu vseh naprav, lahko ugotovimo, da sta zgoraj omenjeni orientaciji edini prisotni (za naprave, ki so zajete v analizi). Vendar nimamo nikakršnega podatka o orientaciji ostalih dveh osi, saj v mirovanju nihata okoli vrednosti 0.
+
+## Delitev na plovbo in mirovanje
+
+Zavoljo lažje analize smo komponente obrnili tako, da je pri vseh napravah z os obrnjena v vertikalni smeri. To smo dosegli tako, da smo komponente, kjer je y os usmerjena vertikalno, zamaknili za eno mesto v desno:
+```{r, eval = FALSE}
+for(i in 1:nrow(outliers)) {
+  if(outliers[i, "vertical_component"] == "y") {
+    tmp1 <- outliers[i, "x"]
+    tmp2 <- outliers[i, "y"]
+    outliers[i, "x"] <- outliers[i, "z"] 
+    outliers[i, "y"] <- tmp1
+    outliers[i, "z"] <- tmp2
+  }
+}
+```
+
+Opazimo lahko, da med plovbo (Slika 2.4.1), os x praktièno nikoli ne preseže vrednosti 1G in skoraj vse outlierje sprožita komponenti y in z. Medtem ko so vrednosti v mirovanju bolj nakljuène (Slika 2.4.2). Poleg tega je razvidno tudi, da nikoli vse tri komoponente ne presežejo meje 1G naenkrat.
+
+```{r, echo=FALSE}
+tmpr <- rout
+tmps <- sout
+
+tmpr$up_comp <- ifelse(tmpr$boat_id == 1877 | tmpr$boat_id == 1880, "-z", "+y")
+tmps$up_comp <- ifelse(tmps$boat_id == 1877 | tmps$boat_id == 1880, "-z", "+y")
+
+tmpr$run <- rep(TRUE, nrow(tmpr))
+tmps$run <- rep(FALSE, nrow(tmps))
+
+out <- rbind(tmpr, tmps)
+
+for(i in 1:nrow(out)) {
+  if(out[i, "up_comp"] == "+y") {
+    tmp1 <- out[i, "x"]
+    tmp2 <- out[i, "y"]
+    out[i, "x"] <- out[i, "z"] 
+    out[i, "y"] <- tmp1
+    out[i, "z"] <- tmp2
+  }
+}
+png(filename = "Diploma/16.png", height = 512, width = 512)
+tmp <- data.frame(created = seq(1,nrow(rout),1), x = rout$deltax, y = rout$deltay, z = rout$deltaz, boat_id = as.character(rout$boat_id))
+plotdf <- melt(tmp, id = c("created","boat_id"))
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable, shape = boat_id)) +
+        geom_point() +
+        labs(x = "Toèke", y = "Jakost sunka", colour = "Komponente", shape = "Id èolna")
+dev.off()
+
+png(filename = "Diploma/17.png", height = 512, width = 512)
+tmp <- data.frame(created = seq(1,nrow(sout),1), x = sout$deltax, y = sout$deltay, z = sout$deltaz, boat_id = as.character(sout$boat_id))
+plotdf <- melt(tmp, id = c("created","boat_id"))
+ggplot(data = plotdf, aes(x = created, y = value, colour = variable, shape = boat_id)) +
+        geom_point() +
+        labs(x = "Toèke", y = "Jakost sunka", colour = "Komponente", shape = "Id èolna")
+dev.off()
+```
+
+```{r, echo=FALSE}
+rm(data_count, data_x, data_xyz, data_z, data_y, out, plotdf, rout, sout, tmp, tmp1, tmp2, tmpb, tmpr, tmps, tmpx, tmpy, tmpz, condx, condy, condz, del, i, ids, j, x, y, z)
+```
+
+
+
+***
+# Analiza Shock Count
+
+## Uvod
+Podatek Shock count merimo tako, da beležimo kolikokrat na dano èasovno enoto Shock amplitude preseže neko vrednost. Ta vrednost je vnaprej doloèena, statièna in enaka pri vseh napravah. Vrednost, ki jo lahko zavzame Shock count leži na intervalu med 0 in 6000.
+
+## Podatki
+```{r, include=FALSE}
+data_sc <- merge_wb("firstclass_may.csv", sensor_name = "Shock Count")
+data_x <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration")
+data_y <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 1")
+data_z <- merge_wb("firstclass_may.csv", sensor_name = "Acceleration 2")
+data_sc$shock <- sqrt(data_x$value^2 + data_y$value^2 + data_z$value^2)
+data_sc <- clean_data(data_sc)
+
+data_count <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock Count")
+data_amplitude <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Shock amplitude")
+data_voltage <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage")
+data_voltage1 <- merge_wb(boat_path = "firstclass_may.csv", boat_variables = "name", sensor_name = "Battery Voltage 1")
+
+data_full <- rbind(data_count, data_amplitude, data_voltage, data_voltage1)
+data_full <- clean_data_full(data_full)
+```
+
+Podatki s katerimi operiramo so zopet povezani z vremenskimi in edini dodatek je stolpec Shock Count. Poleg tega tokrat ne išèemo outlierjev, ampak operiramo s celotno množico poodatkov.
+```{r, echo=FALSE}
+tmp <- data_sc[order(created),] 
+colnames(tmp)[colnames(tmp) == "shock"] <- "Shock amplitude"
+colnames(tmp)[colnames(tmp) == "value"] <- "Shock count"
+tmp[,c("boat_id", "created", "st_x", "st_y", "speed", "bearing", "Shock amplitude", "Shock count", "wind_speed", "sailpoint")]
+```
+## Razlikovanje med napravami
+
+Ker so jakosti sil, ki jih naprava zabeleži, odvisne od veliko dejavnikov, je prièakovano, da bodo vrednosti Shock count od naprave do naprave precej razliène, glede na to, da je prag za vse naprave enak.
+
+Èe pogledamo spodnje grafe, lahko vidimo da je temu res tako, nekatere naprave nikoli ne dosežejo najvišje vrednosti, medtem ko druge med plovbo redno zadevajo v zgornjo mejo, tako da verjetno bi bilo bolj smotrno prag prilagoditi vsaki posamezni napravi.
+
+```{r, echo=FALSE}
+sc <- data_sc
+
+ids <- c(1873, 1878, 1882)
+
+for(i in 1:length(ids)) {
+  tmp <- sc[sc$boat_id == ids[i],]
+  border <- find_runs(tmp$speed)
+  for(j in 1:length(border)) {
+    border[j] <- as.POSIXct(as.character(tmp[border[j],"created"]))
+  }
+
+  tmp <- data.frame(created = as.POSIXct(tmp$created), Shock_count = tmp$value)
+  
+  plotdf <- melt(tmp, id = "created")
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value)) +
+        geom_line(colour = "#ef6e6e") +
+        labs(title = paste("Naprava",i), x = "Èas", y = "Shock count", caption = paste("Slika 3.3.",i, sep = "")))
+  if(i == 1) {
+    png(filename = "Diploma/18.png")
+      print(ggplot(data = plotdf, aes(x = created, y = value)) +
+        geom_line(colour = "#ef6e6e") +
+        labs(x = "Èas", y = "Shock count"))
+    dev.off()
+  }
+  if(i == 3) {
+    png(filename = "Diploma/19.png")
+      print(ggplot(data = plotdf, aes(x = created, y = value)) +
+        geom_line(colour = "#ef6e6e") +
+        labs(x = "Èas", y = "Shock count"))
+    dev.off()
+  }
+        
+}
+```
+
+## Primerjava plovbe in mirovanja
+
+Ker GPS naprava vsake toliko v mirovanju "pobezlja" - beleži premikanje, kljub temu, da èoln stoji na mestu, je za zmanjšanje beleženja neresniènih podatkov koristno, da zagotovimo alternativno možnost za preverjanje ali se èoln dejansko premika, ali stoji zasidran v marini.
+
+Shock count je primeren kandidat za takšno klasifikacijo, saj je v mirovanju vibracij bistveno manj, kot med plovbo, kar zmanjša število odzivov, višjih od postavljenega praga.
+
+Spodnji grafi prikazujejo vrednosti Shock count in Shock amplitude, zelena in rdeèa navpièna èrta predstavljata zaèetek in konec plovbe, vmes so obdobja, ko je barka stala pri miru.
+
+Izpeljemo lahko veè rezultatov:
+
+* Potrdimo lahko korelacijo med Shock count-om in plovbo èolna, saj so vrednosti v mirovanju veèinoma 0 ali zelo blizu te vrednosti, med plovbo pa se vredosti precej dvignejo.
+
+* Shock count in Shock amplitude nista neposredno povezana. Najlepši prikaz tega je pri sliki 3.4.1, kjer Shock amplitude vmes skoèi na vrednost približno 4000, Shock count pa ostane nespremenjen.
+
+* Težave povzroèata le dva primera, ki se obèasno pojavita:
+
+    + Vrednost Shock count se med plovbo umiri
+    
+    + Obèasni skok vrednosti Shock count-a med mirovanjem
+ 
+  
+Èe zgoraj omenjena problema povežemo, lahko pride do situacije, ko je vrednost Shock count-a v mirovanju veèja kot med plovbo. Ker je za klasifikacijo plovbe potrebno nastaviti nek prag, je v takem primeru le-tega precej težko doloèiti.
+
+```{r, echo=FALSE}
+sc <- data_sc
+ids <- c(1873, 1879, 1882)
+
+for(i in 1:length(ids)) {
+  tmp <- sc[sc$boat_id == ids[i], ]
+  border <- find_runs(tmp$speed)
+  s <- NULL
+  f <- NULL
+  for(j in seq(1,length(border),2)) {
+    s <- c(s, as.POSIXct(as.character(tmp[border[j],"created"])))
+    f <- c(f, as.POSIXct(as.character(tmp[border[(j+1)],"created"])))
+  }
+  
+  tmp <- data.frame(created = as.POSIXct(tmp$created), Shock_count = tmp$value, Shock_amplitude = tmp$shock)
+  plotdf <- melt(tmp, id = "created")
+  
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+          geom_line() +
+          labs(title = paste("Naprava", i), x = "Èas", y = "Vrednost", colour = "Spremenljivka", caption = paste("Slika 3.4.",i, sep = "")) +
+          geom_vline(xintercept = s, colour = "green") +
+          geom_vline(xintercept = f, colour = "red")
+        )
+  
+  if(i == 1) {
+    png(filename = "Diploma/20.png", height = 512, width = 512)
+      print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+          geom_line() +
+          labs(x = "Èas", y = "Vrednost", colour = "Spremenljivka") +
+          geom_vline(xintercept = s, colour = "green") +
+          geom_vline(xintercept = f, colour = "red")
+        )
+    dev.off()
+  }
+}
+```
+
+
+## Korelacija med Shock count in Battery voltage
+
+Med iskanjem korelacij z ostalimi senzorji, ki jih imamo še na voljo, se je pojavila povezava med vrednostmi Shock count in Battery voltage. 
+
+Lepo je namreè razvidno, da vsakiè, ko Shock count doseže visoko vrednost, je stanje Battery voltage visoko. To je najbolj oèitno pri napravah, ki pogosto zasedejo najvišjo možno vrednost pri Shock count.
+
+Zaradi lepšega prikaza so vrednosti skalirane, in sicer:
+$$Shock\,count = Shock\,count / 1000$$
+$$Battery\,voltage = Battery\,voltage - 7.5$$
+
+```{r, echo=FALSE}
+ids <- c(1877, 1881, 1882)
+for(k in 1:length(ids)) {
+  idx <- k
+  data <- data_full
+  # data <- data_xyz
+  
+  sensors <- unique(data$name)
+  sensors <- sensors[order(sensors)]
+  # ids <- unique(data$boat_id)
+  # ids <- ids[order(ids)]
+  
+  boat <- data[data$boat_id == ids[idx], ]
+  # boat <- boat[boat$created > as.POSIXct("2017-05-14T00:00:00Z") & boat$created < as.POSIXct("2017-05-15T00:00:00Z"), ]
+  values <- NULL
+  values <- data.frame(
+    created = NULL,
+    name = NULL,
+    value = NULL
+  )
+  
+  # colnames(values) <- c("created","name","value")
+  j <- 0
+  
+  sensors <- c("Shock Count", "Battery Voltage", "Battery Voltage 1")
+  # sensors <- c("Shock amplitude","Acceleration","Acceleration 1","Acceleration 2")
+  
+  for(i in 1:length(sensors)) {
+    # if(sensors[i] == "Operator ID" | sensors[i] == "Trigger event type")
+    #   i <- i + 1
+  
+    tmp <- boat[boat$name == sensors[i], c("created","name","value")]
+    
+    if(sensors[i] == "Shock Count" | sensors[i] == "Shock amplitude") {
+      tmp$value <- tmp$value / 1000
+    } else {
+      tmp$value <- tmp$value - 7.5
+    }
+  
+    # tmp$value <- (tmp$value - mean(tmp$value)) / sd(tmp$value) + 50 * j
+    
+    values <- rbind(values, tmp)
+    j <- j + 1    
+  
+  }
+  
+  values$created <- as.POSIXct(values$created)
+  colnames(values) <- c("created","variable","value")
+  plotdf <- values
+  
+  # plotdf <- melt(tmp, id = "created")
+  
+  # png(filename = "graph_04.png", height = 2048, width = 2048, units = "px")
+  print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() +
+        labs(title = paste("Naprava",k), x = "Èas", y = "Skalirana vrednost", colour = "Spremenljivka", caption = paste("Slika 3.5.",k, sep = "")))
+  # dev.off()
+  if(k == 2) {
+    png(filename = "Diploma/21.png", height = 512, width = 512)
+      print(ggplot(data = plotdf, aes(x = created, y = value, colour = variable)) +
+        geom_line() +
+        labs(x = "Èas", y = "Skalirana vrednost", colour = "Spremenljivka" ))
+    dev.off()
+  }
+}
+```
+
+```{r, echo=FALSE}
+rm(boat, data, data_amplitude, data_count, data_full, data_sc, data_voltage, data_voltage1, data_x, data_y, data_z, plotdf, sc, tmp, border, f, i, ids, idx, j, k, s, sensors, values)
+```
+
+
+***
